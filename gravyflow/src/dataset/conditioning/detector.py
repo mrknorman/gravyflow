@@ -975,6 +975,12 @@ def _isotropic_draw(parameter: str, num_examples: int, rng: np.random.Generator)
     return 2.0 * np.pi * rng.random(num_examples)
 
 
+def _support(value, name: str) -> Tuple[float, float]:
+    """The (low, high) a float or gf.Distribution can take (``get_support_bounds``), infinite where unbounded."""
+    from gravyflow.src.dataset.features.injection import get_support_bounds
+    return get_support_bounds(value, name)
+
+
 def _upper_bound(value, name: str) -> float:
     """The largest value ``value`` (a float or a gf.Distribution) can take; ValueError if it has none."""
     if isinstance(value, gf.Distribution):
@@ -1260,8 +1266,9 @@ class Detectors:
     detectors (gf.IFO) at their sites, and DetectorSlots whose geometry is
     drawn per example; and how many are present in each example.
 
-    ``num_present`` (a gf.Distribution of integers in [1, len(detectors)];
-    None: all of them) is drawn per example from the batch's
+    ``num_present`` (a gf.Distribution of whole numbers in [1, len(detectors)],
+    refused here when its type or bounds allow any other; None: all of them)
+    is drawn per example from the batch's
     ``network/count`` stream, and the present detectors are a uniformly random
     subset of that size, from ``network/subset``. An absent detector keeps its
     noise but receives no signal, so it adds nothing to the network SNR a
@@ -1279,9 +1286,31 @@ class Detectors:
         object.__setattr__(self, "detectors", tuple(check_detectors(self.detectors)))
         if not self.detectors:
             raise ValueError("Detectors needs at least one detector.")
-        if self.num_present is not None and not isinstance(self.num_present, gf.Distribution):
+        if self.num_present is not None:
+            self._check_num_present()
+
+    def _check_num_present(self):
+        """Refuse a ``num_present`` that could draw other than a whole number from 1 to the detectors."""
+        num_present = self.num_present
+        if not isinstance(num_present, gf.Distribution):
             raise TypeError(
-                f"num_present is a gf.Distribution of the number of detectors present, not {self.num_present!r}."
+                f"num_present is a gf.Distribution of the number of detectors present, not {num_present!r}."
+            )
+        kind = num_present.type_
+        values = [num_present.value] if kind == gf.DistributionType.CONSTANT \
+            else num_present.possible_values if kind == gf.DistributionType.CHOICE else None
+        whole = num_present.dtype == int or kind == gf.DistributionType.POW_TWO if values is None \
+            else all(float(value) == round(float(value)) for value in values)
+        if not whole:
+            raise ValueError(
+                f"num_present draws whole numbers of detectors: give its {kind.name} distribution "
+                f"{'dtype=int' if values is None else 'whole values'}, not {num_present!r}."
+            )
+        low, high = _support(num_present, "num_present")
+        if low < 1 or high > self.num_detectors:
+            raise ValueError(
+                f"num_present can draw {low:g} to {high:g} detectors, outside the 1 to {self.num_detectors} "
+                "detectors there are: bound its distribution within them."
             )
 
     def specification(self) -> Dict:

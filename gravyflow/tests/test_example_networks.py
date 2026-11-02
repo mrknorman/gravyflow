@@ -116,12 +116,32 @@ def test_slots_have_no_real_noise(noise_type):
             ifos=slots(2))
 
 
-def test_a_detector_count_outside_the_detectors_is_refused():
-    streams = gf.SeedTree(5).batch("train", 0, 0)
-    with pytest.raises(ValueError, match="whole number from 1"):
-        gf.Detectors(slots(2), num_present=count_between(0, 2)).sample(64, streams)
-    with pytest.raises(ValueError, match="whole number from 1"):
-        gf.Detectors(slots(2), num_present=count_between(2, 3)).sample(64, streams)
+@pytest.mark.parametrize("num_present", [
+    count_between(0, 2), count_between(2, 3),
+    gf.Distribution(value=3, type_=gf.DistributionType.CONSTANT),
+    gf.Distribution(possible_values=[1, 3], type_=gf.DistributionType.CHOICE),
+    gf.Distribution(mean=1.5, std=0.5, type_=gf.DistributionType.NORMAL, dtype=int),
+], ids=["below", "above", "constant", "choice", "unbounded"])
+def test_a_detector_count_outside_the_detectors_is_refused_at_construction(num_present):
+    with pytest.raises(ValueError, match=r"num_present can draw .* outside the 1 to 2 detectors"):
+        gf.Detectors(slots(2), num_present=num_present)
+
+
+@pytest.mark.parametrize("num_present", [
+    gf.Distribution(min_=1.0, max_=2.0, type_=gf.DistributionType.UNIFORM),
+    gf.Distribution(value=1.5, type_=gf.DistributionType.CONSTANT),
+    gf.Distribution(possible_values=[1, 1.5], type_=gf.DistributionType.CHOICE),
+], ids=["uniform_float", "constant", "choice"])
+def test_a_detector_count_that_is_not_whole_is_refused_at_construction(num_present):
+    with pytest.raises(ValueError, match="num_present draws whole numbers"):
+        gf.Detectors(slots(2), num_present=num_present)
+
+
+def test_a_detector_count_inside_the_detectors_is_drawn():
+    for num_present in (count_between(1, 2), gf.Distribution(value=2, type_=gf.DistributionType.CONSTANT),
+                        gf.Distribution(possible_values=[1, 2], type_=gf.DistributionType.CHOICE)):
+        present = gf.Detectors(slots(2), num_present=num_present).draw_present(64, gf.SeedTree(5).batch("train", 0, 0))
+        assert set(np.sum(present, axis=1).tolist()) <= {1.0, 2.0}
 
 
 def test_the_network_streams_are_registered():

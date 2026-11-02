@@ -143,7 +143,8 @@ repository before it may need the changes below.
   arm's azimuth uniform, an opening angle of pi / 2, level arms, every parameter a value or a `gf.Distribution`), and
   its simulated noise from its own (`noise/{slot}/{on,off}`), with the curve its `noise_curve` has in the noise
   profile. `gf.Detectors` (a dataset's `ifos=`) adds how many detectors each example has (`network/count`) and which
-  (`network/subset`); an absent detector keeps its noise, receives no signal and adds nothing to the network SNR a
+  (`network/subset`; a count its distribution's type or bounds would draw outside 1 to the detectors is refused
+  when the Detectors are made); an absent detector keeps its noise, receives no signal and adds nothing to the network SNR a
   signal is scaled to. Each example is projected onto its own network (`gf.ExampleNetworks`, the library's
   projection vectorised over examples), and placement allows for the farthest a detector can be (the WGS84
   equatorial radius plus a slot's greatest height). `ReturnVariables.DETECTOR_GEOMETRY` (B, I, 9: each detector's
