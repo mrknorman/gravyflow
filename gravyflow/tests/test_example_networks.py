@@ -381,14 +381,38 @@ def test_placement_allows_for_the_farthest_detector():
 
 def test_central_times_lie_within_each_examples_light_travel_time():
     ds = dataset(gf.Detectors(slots(3), num_present=count_between(2, 3)),
-                 inputs=(RV.DETECTOR_GEOMETRY,), outputs=(RV.CENTRAL_TIME, RV.INJECTION_MASKS))
+                 inputs=(RV.DETECTOR_GEOMETRY, RV.DETECTOR_MASK), outputs=(RV.CENTRAL_TIME, RV.INJECTION_MASKS))
     x, y = ds[0]
     times = np.asarray(y["CENTRAL_TIME"], np.float64)[:, 0] * 1.0  # (B, D), seconds: the window is 1 s
     location = np.asarray(x["DETECTOR_GEOMETRY"], np.float64)[..., :3] * WGS84_EQUATORIAL_RADIUS_METERS
     baselines = np.linalg.norm(location[:, :, None] - location[:, None], axis=-1) / C
-    injected = np.asarray(y["INJECTION_MASKS"])[:, 0] > 0
-    differences = np.abs(times[:, :, None] - times[:, None])[injected]
-    assert injected.any() and np.all(differences <= baselines[injected] + 1e-6)
+    mask = np.asarray(x["DETECTOR_MASK"]) > 0
+    pairs = (mask[:, :, None] & mask[:, None]) & (np.asarray(y["INJECTION_MASKS"])[:, 0] > 0)[:, None, None]
+    differences = np.abs(times[:, :, None] - times[:, None])[pairs]
+    assert pairs.any() and np.all(differences <= baselines[pairs] + 1e-6)
+
+
+def test_an_absent_detectors_outputs_are_its_noises_and_no_signals():
+    """
+    An absent detector keeps its noise and receives no signal: the amounts of
+    signal are 0, and its arrival time, which no signal has, is NaN where a
+    present detector has its own.
+    """
+    ds = dataset(gf.Detectors([gf.IFO.H1, *slots(2)], num_present=count_between(1, 2)),
+                 noise_type=gf.NoiseType.COLORED, inputs=(RV.WHITENED_ONSOURCE, RV.DETECTOR_MASK),
+                 outputs=(RV.CENTRAL_TIME, RV.INJECTION_MASKS, RV.DETECTOR_SNR, RV.WHITENED_PEAK, RV.INJECTIONS,
+                          RV.WHITENED_INJECTIONS, RV.BNS_RANGE_MPC))
+    x, y = ds[0]
+    mask = np.asarray(x["DETECTOR_MASK"])
+    injected = (np.asarray(y["INJECTION_MASKS"])[:, 0] > 0)[:, None]
+    absent, present = (mask == 0) & injected, (mask > 0) & injected
+    assert absent.any() and present.any()
+    times = np.asarray(y["CENTRAL_TIME"])[:, 0]
+    assert np.isnan(times[absent]).all() and np.isfinite(times[present]).all()
+    for name in ("DETECTOR_SNR", "WHITENED_PEAK", "INJECTIONS", "WHITENED_INJECTIONS"):
+        np.testing.assert_array_equal(np.asarray(y[name])[:, 0][absent], 0.0, err_msg=name)
+    assert np.all(np.std(np.asarray(x["WHITENED_ONSOURCE"])[mask == 0], axis=-1) > 0)
+    assert np.all(np.asarray(y["BNS_RANGE_MPC"])[mask == 0] > 0)
 
 
 # --- noise ------------------------------------------------------------------

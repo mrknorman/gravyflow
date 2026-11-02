@@ -137,7 +137,8 @@ parameter can be a value or a `gf.Distribution`), and its noise, simulated only,
 the curve a bundled detector has in the noise profile. Slots whose geometry is drawn are given as `gf.Detectors`: a
 plain list of detectors is a fixed network, so a slot in one has all its geometry fixed (a custom detector).
 `gf.Detectors` also draws how many detectors each example has;
-an absent detector keeps its noise, receives no signal and adds nothing to the SNR a signal is scaled to.
+an absent detector keeps its noise, receives no signal (its `CENTRAL_TIME` is NaN) and adds nothing to the SNR a
+signal is scaled to.
 `DETECTOR_SNR` gives each detector's optimal SNR of each injection, whose root-sum-square over the detectors is
 the network SNR it was scaled to (0 in an absent detector).
 `DETECTOR_GEOMETRY` (each detector's Earth-fixed position in Earth radii and its response tensor's six components)

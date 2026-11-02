@@ -255,6 +255,15 @@ class ReturnVariables(Enum):
     WaveformParameter and ScalingType) are NaN where generator g injected
     nothing into example b, except INJECTION_MASKS, which is 0 there.
 
+    A detector absent from an example's network (gf.Detectors; DETECTOR_MASK
+    0) keeps its noise and receives no signal, so each per-detector output
+    gives it what that means: the data and the noise's labels (ONSOURCE,
+    OFFSOURCE, WHITENED_ONSOURCE, BNS_RANGE_MPC, START_GPS_TIME) are its
+    noise's, as a present detector's are; the amounts of signal (INJECTIONS,
+    WHITENED_INJECTIONS, WHITENED_PEAK, DETECTOR_SNR) are 0; CENTRAL_TIME, the
+    time a signal arrives, is NaN; DETECTOR_GEOMETRY is the geometry it was
+    drawn with.
+
     GravyflowDataset and ComposedDataset check every batch against this
     contract; a composed dataset's generators G are every pool's.
     """
@@ -284,6 +293,7 @@ class ReturnVariables(Enum):
     # - a supernova, once a supernova generator exists: its explosion;
     # - a generic burst: its peak, the envelope's centre for a sine-Gaussian,
     #   chirplet, WNB or periodic wave, and a ringdown's start.
+    # NaN in a detector absent from the example's network, which no signal reaches.
     CENTRAL_TIME = ReturnVariable(9, (BATCH, GENERATOR, IFO))
     
     # Labels and Types (transient mode), per detector
@@ -2124,6 +2134,10 @@ class InjectionGenerator:
 
                 # Normalize by duration (0 to 1)
                 normalized_time = final_time / dur
+                # No signal arrives at a detector absent from the example's
+                # network, so it has no arrival time.
+                if isinstance(network, gf.ExampleNetworks):
+                    normalized_time = ops.where(network.present > 0, normalized_time, np.nan)
 
                 generator_labels[ReturnVariables.CENTRAL_TIME] = normalized_time
 

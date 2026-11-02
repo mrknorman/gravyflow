@@ -430,6 +430,12 @@ repository before it may need the changes below.
 
 ### Fixed
 
+- **An absent detector's `CENTRAL_TIME` is NaN.** A detector absent from an example's network (`gf.Detectors`) was
+  given the time a signal would have arrived at it, though none does. It is now NaN, as a time without its event is.
+  Every other per-detector output gives an absent detector what that means, as `ReturnVariables` documents: its
+  noise and the noise's labels as a present detector's, 0 for the amounts of signal (`INJECTIONS`,
+  `WHITENED_INJECTIONS`, `WHITENED_PEAK`, `DETECTOR_SNR`). Fixed networks are unchanged.
+
 - **A generator's own network is refused where examples draw their networks.** A dataset given `gf.Detectors` that
   vary (slots, or `num_present`) replaced each generator's network with them, so a generator given geometry of its
   own (a Network built from a dict or a config) was projected onto the drawn networks instead, silently, though a
