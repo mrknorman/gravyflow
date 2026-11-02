@@ -981,20 +981,20 @@ def _support(value, name: str) -> Tuple[float, float]:
     return get_support_bounds(value, name)
 
 
-def _upper_bound(value, name: str) -> float:
-    """The largest value ``value`` (a float or a gf.Distribution) can take; ValueError if it has none."""
-    if isinstance(value, gf.Distribution):
-        if value.type_ == gf.DistributionType.CONSTANT:
-            return float(value.value)
-        if value.type_ == gf.DistributionType.CHOICE:
-            return float(np.max(value.possible_values))
-        if value.max_ is None:
-            raise ValueError(
-                f"{name} needs a largest value: injections are placed so that a signal delayed to the "
-                "farthest detector stays in the window. Give its distribution a max_."
-            )
-        return float(value.max_)
-    return float(value)
+#: The heights a slot's vertex may lie at, metres from the WGS84 ellipsoid: the
+#: Earth's surface lies within about 11 km of it (the deepest trench) and every
+#: detector within a few hundred metres, so a vertex 10 km away is none.
+MAX_SLOT_HEIGHT_METERS = 10_000.0
+
+#: The range each bounded slot parameter's values must lie in, (low, high, open):
+#: an open range excludes its ends. Longitude and the azimuths wrap, so take any value.
+_SLOT_RANGES = {
+    "latitude_radians": (-np.pi / 2.0, np.pi / 2.0, False),
+    "opening_angle_radians": (0.0, np.pi, True),
+    "height_meters": (-MAX_SLOT_HEIGHT_METERS, MAX_SLOT_HEIGHT_METERS, False),
+    "x_altitude_radians": (-np.pi / 2.0, np.pi / 2.0, False),
+    "y_altitude_radians": (-np.pi / 2.0, np.pi / 2.0, False),
+}
 
 
 @dataclass(frozen=True)
@@ -1017,6 +1017,12 @@ class DetectorSlot:
     ``opening_angle_radians`` anticlockwise of it seen from above, as the
     bundled detectors' arms do (pi / 2; pi / 3 for a triangle's detector); the
     arms are level. Arm lengths enter no projection.
+
+    Refused by name, here: a latitude or arm altitude outside [-pi / 2, pi / 2],
+    an opening angle outside (0, pi), a height more than
+    ``MAX_SLOT_HEIGHT_METERS`` from the ellipsoid, and a distribution whose
+    support (its bounds, values, or an unbounded NORMAL's) reaches outside
+    them. Longitude and the azimuths wrap.
 
     A slot's ``name`` is its own: none of the bundled detectors' (L1, H1, V1).
     """
@@ -1055,6 +1061,18 @@ class DetectorSlot:
                 f"A detector slot's {parameter} is a float or a gf.Distribution"
                 f"{', or None for its default draw' if parameter in SLOT_GEOMETRY[:3] else ''}; got {value!r}."
             )
+        for parameter, (low, high, open_) in _SLOT_RANGES.items():
+            value = getattr(self, parameter)
+            if value is None:
+                continue
+            least, most = _support(value, f"{self.name}'s {parameter}")
+            outside = (least <= low or most >= high) if open_ else (least < low or most > high)
+            if outside:
+                ends = "(" if open_ else "["
+                raise ValueError(
+                    f"{self.name}'s {parameter} can lie only in {ends}{low:g}, {high:g}{')' if open_ else ']'}, "
+                    f"but {value!r} reaches {least:g} to {most:g}."
+                )
 
     def draw(self, num_examples : int, streams) -> Dict[str, np.ndarray]:
         """
@@ -1081,7 +1099,7 @@ class DetectorSlot:
 
     def max_geocentre_distance_meters(self) -> float:
         """The farthest the slot's vertex can be from the geocentre: the equatorial radius plus its greatest height."""
-        return WGS84_EQUATORIAL_RADIUS_METERS + max(_upper_bound(self.height_meters, f"{self.name}'s height_meters"), 0.0)
+        return WGS84_EQUATORIAL_RADIUS_METERS + max(_support(self.height_meters, f"{self.name}'s height_meters")[1], 0.0)
 
 
 def detector_geometry(parameters : Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:

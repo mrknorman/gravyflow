@@ -105,6 +105,32 @@ def test_a_slot_is_named_as_no_bundled_detector():
         gf.DetectorSlot("D0", noise_curve=gf.IFO.H1, height_meters=None)
 
 
+
+def uniform(low, high):
+    return gf.Distribution(min_=low, max_=high, type_=gf.DistributionType.UNIFORM)
+
+
+@pytest.mark.parametrize("parameter,value", [
+    ("latitude_radians", 1.6), ("latitude_radians", uniform(-1.0, 1.6)),
+    ("latitude_radians", gf.Distribution(mean=0.0, std=0.3, type_=gf.DistributionType.NORMAL)),
+    ("opening_angle_radians", 0.0), ("opening_angle_radians", np.pi), ("opening_angle_radians", uniform(0.5, 3.5)),
+    ("height_meters", 10_001.0), ("height_meters", -10_001.0), ("height_meters", uniform(0.0, 2e4)),
+    ("height_meters", gf.Distribution(mean=0.0, std=1.0, type_=gf.DistributionType.NORMAL)),
+    ("x_altitude_radians", -1.6), ("y_altitude_radians", gf.Distribution(possible_values=[0.0, 2.0],
+                                                                         type_=gf.DistributionType.CHOICE)),
+])
+def test_a_slots_geometry_outside_its_range_is_refused_by_name(parameter, value):
+    with pytest.raises(ValueError, match=f"D0's {parameter} can lie"):
+        gf.DetectorSlot("D0", noise_curve=gf.IFO.H1, **{parameter: value})
+
+
+def test_a_slots_geometry_at_its_ranges_ends_is_kept():
+    """Latitude and altitude to plus or minus pi / 2, an opening angle inside (0, pi), a height within 10 km."""
+    slot = gf.DetectorSlot("D0", noise_curve=gf.IFO.H1, latitude_radians=np.pi / 2, opening_angle_radians=3.0,
+                           height_meters=uniform(-10_000.0, 10_000.0), x_altitude_radians=-np.pi / 2,
+                           longitude_radians=7.0, x_angle_radians=-20.0)  # longitude and azimuth wrap
+    assert slot.max_geocentre_distance_meters() == WGS84_EQUATORIAL_RADIUS_METERS + 10_000.0
+
 @pytest.mark.parametrize("noise_type", [gf.NoiseType.REAL, gf.NoiseType.PSEUDO_REAL])
 def test_slots_have_no_real_noise(noise_type):
     with pytest.raises(ValueError, match="have no real data"):
@@ -301,8 +327,6 @@ def test_placement_allows_for_the_farthest_detector():
     generator = ds.waveform_generators[0]
     assert generator.network is ds.detectors
     assert generator.detector_margin_seconds() == (WGS84_EQUATORIAL_RADIUS_METERS + 3000.0) / 299792458.0
-    with pytest.raises(ValueError, match="needs a largest value"):
-        dataset(slots(2, height_meters=gf.Distribution(mean=0.0, std=1.0, type_=gf.DistributionType.NORMAL)))
 
 
 def test_central_times_lie_within_each_examples_light_travel_time():

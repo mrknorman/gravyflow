@@ -140,7 +140,9 @@ repository before it may need the changes below.
 
 - **Networks drawn per example.** `gf.DetectorSlot` is a detector at no bundled site: its geometry is drawn per
   example from streams of its own (`network/{slot}/{parameter}`; by default its vertex uniform on the sphere, its x
-  arm's azimuth uniform, an opening angle of pi / 2, level arms, every parameter a value or a `gf.Distribution`), and
+  arm's azimuth uniform, an opening angle of pi / 2, level arms, every parameter a value or a `gf.Distribution`;
+  a latitude or arm altitude outside [-pi / 2, pi / 2], an opening angle outside (0, pi) or a height more than 10 km
+  from the ellipsoid, or a distribution reaching outside them, is refused by name), and
   its simulated noise from its own (`noise/{slot}/{on,off}`), with the curve its `noise_curve` has in the noise
   profile. `gf.Detectors` (a dataset's `ifos=`) adds how many detectors each example has (`network/count`) and which
   (`network/subset`; a count its distribution's type or bounds would draw outside 1 to the detectors is refused
