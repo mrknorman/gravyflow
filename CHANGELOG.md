@@ -408,6 +408,12 @@ repository before it may need the changes below.
 
 ### Fixed
 
+- **A generator's own network is refused where examples draw their networks.** A dataset given `gf.Detectors` that
+  vary (slots, or `num_present`) replaced each generator's network with them, so a generator given geometry of its
+  own (a Network built from a dict or a config) was projected onto the drawn networks instead, silently, though a
+  fixed network keeps it. It is now refused by name; a generator's network may be the dataset's Detectors or a
+  Network of their bundled detectors.
+
 - **A Network's geometry is computed and held in float64.** `gf.Network` rounded its detectors' sites to float32
   before placing their vertices (through astropy, one detector at a time) and held its geometry in float32, so the
   bundled detectors' vertices lay 0.1 to 0.43 m from lal's, and a Network built from geometry up to 2.5 m from its

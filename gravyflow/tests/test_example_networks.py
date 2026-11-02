@@ -441,6 +441,33 @@ def test_a_generator_with_geometry_of_its_own_gives_no_geometry_output():
         dataset([gf.IFO.H1, gf.IFO.L1], generators=[wnb(network=own)], inputs=(RV.DETECTOR_GEOMETRY,))
 
 
+
+@pytest.mark.parametrize("detectors,other", [
+    (gf.Detectors([gf.IFO.H1, gf.IFO.L1], num_present=gf.Distribution(value=2, type_=gf.DistributionType.CONSTANT)),
+     gf.Detectors([gf.IFO.H1, gf.IFO.L1])),
+    (gf.Detectors([gf.DetectorSlot("A", noise_curve=gf.IFO.H1), gf.DetectorSlot("B", noise_curve=gf.IFO.H1)]),
+     gf.Detectors([gf.DetectorSlot("A", noise_curve=gf.IFO.H1, height_meters=100.0),
+                   gf.DetectorSlot("B", noise_curve=gf.IFO.H1)])),
+], ids=["num_present", "slots"])
+def test_a_generator_with_geometry_of_its_own_is_refused_where_examples_draw_their_networks(detectors, other):
+    """Each example is projected onto the network it draws, so a generator's own geometry would be dropped."""
+    own = gf.Network({"latitude_radians": [0.1, -0.7], "longitude_radians": [0.3, 2.0], "y_angle_radians": [0.2, 1.1],
+                      "height_meters": [0.0, 0.0], "x_length_meters": [4e3, 4e3], "y_length_meters": [4e3, 4e3]})
+    with pytest.raises(ValueError, match="WNBGenerator's network is geometry of its own"):
+        dataset(detectors, generators=[wnb(network=own)])
+    with pytest.raises(ValueError, match="WNBGenerator's network is not the dataset's gf.Detectors"):
+        dataset(detectors, generators=[wnb(network=other)])
+
+
+def test_a_generator_with_the_datasets_own_detectors_draws_their_networks():
+    """A generator given the dataset's detectors (its Detectors, or a Network of its bundled detectors) keeps them."""
+    detectors = gf.Detectors([gf.IFO.H1, gf.IFO.L1], num_present=count_between(1, 2))
+    reference = dataset(detectors)[0][1]["INJECTIONS"]
+    for network in (detectors, gf.Network([gf.IFO.H1, gf.IFO.L1])):
+        ds = dataset(detectors, generators=[wnb(network=network)])
+        assert ds.waveform_generators[0].network is ds.detectors
+        np.testing.assert_array_equal(ds[0][1]["INJECTIONS"], reference)
+
 def test_a_composed_dataset_draws_each_examples_network():
     pool = gf.FeaturePool(name="signal", label=1, probability=1.0,
                           noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE), injection_generators=[wnb()])

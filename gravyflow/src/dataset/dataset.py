@@ -285,6 +285,30 @@ def check_network_matches_ifos(network: "gf.Network", ifos) -> None:
         )
 
 
+
+def check_network_is_detectors(generator, detectors: Detectors) -> None:
+    """
+    Raise ValueError, naming the generator, unless its network is the
+    dataset's ``detectors``: the gf.Detectors themselves, or a Network of
+    their bundled detectors (`check_network_matches_ifos` has checked the
+    names). Each example is projected onto the network it draws from them, so
+    any other geometry would be dropped silently.
+    """
+    network = generator.network
+    if isinstance(network, Detectors):
+        if network != detectors:
+            raise ValueError(
+                f"{type(generator).__name__}'s network is not the dataset's gf.Detectors: each example is "
+                "projected onto the network it draws from the dataset's own. Leave the generator's network "
+                "unset, or give it the dataset's detectors."
+            )
+    elif getattr(network, "ifos", None) is None:
+        raise ValueError(
+            f"{type(generator).__name__}'s network is geometry of its own, but each example is projected onto "
+            "the network it draws from the dataset's gf.Detectors, so that geometry would be dropped. Leave "
+            "the generator's network unset, or give the dataset that geometry as a fixed network."
+        )
+
 def lowest_generator_frequency(generator) -> Optional[float]:
     """The lowest frequency a generator's parameters allow, where it declares one."""
     lowest = None
@@ -1058,7 +1082,8 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         several channels or mislabel them, so it raises. Where examples have
         networks of their own (``Detectors.varies``), every generator's network
         is the dataset's Detectors, and each batch is projected onto the
-        networks it draws.
+        networks it draws; a generator's own network must then be those
+        detectors (`check_network_is_detectors`).
         """
         noise_ifos = self._noise_ifos()
         self.detectors = dataset_detectors(self.ifos, noise_ifos, self._obtainers())
@@ -1066,6 +1091,8 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         def bind(generator):
             if generator.network is not None:
                 check_network_matches_ifos(generator.network, noise_ifos)
+                if self.detectors.varies:
+                    check_network_is_detectors(generator, self.detectors)
             if self.detectors.varies:
                 generator.network = self.detectors
             elif generator.network is None:
