@@ -239,9 +239,18 @@ def dataset_detectors(ifos, noise_ifos: List, obtainers) -> Detectors:
     A dataset's detectors as gf.Detectors: its ``ifos`` if they are, else its
     noise's detectors (``noise_ifos``), all present in every example. No two may
     share a name (`check_detectors`), and only simulated noise has detector
-    slots; either is refused by name.
+    slots; either is refused by name. A plain list is a fixed network, so a
+    slot in one has all its geometry fixed: one whose geometry is drawn is
+    refused by name, for gf.Detectors.
     """
     detectors = ifos if isinstance(ifos, Detectors) else Detectors(noise_ifos)
+    drawn = [slot.name for slot in detectors.slots if slot.drawn]
+    if drawn and not isinstance(ifos, Detectors):
+        raise ValueError(
+            f"The geometry of the detector slots {drawn} is drawn, but a plain list of detectors is a fixed "
+            "network. Give them as gf.Detectors (ifos=gf.Detectors([...])) to draw each example's network, "
+            "or fix every parameter of their geometry."
+        )
     if detectors.slots and any(reads_real_data(obtainer) for obtainer in obtainers):
         raise ValueError(
             f"The detector slots {[slot.name for slot in detectors.slots]} have no real data: a slot's "

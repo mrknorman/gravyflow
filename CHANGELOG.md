@@ -144,7 +144,9 @@ repository before it may need the changes below.
   a latitude or arm altitude outside [-pi / 2, pi / 2], an opening angle outside (0, pi) or a height more than 10 km
   from the ellipsoid, or a distribution reaching outside them, is refused by name), and
   its simulated noise from its own (`noise/{slot}/{on,off}`), with the curve its `noise_curve` has in the noise
-  profile. `gf.Detectors` (a dataset's `ifos=`) adds how many detectors each example has (`network/count`) and which
+  profile. Slots whose geometry is drawn are given as `gf.Detectors` (a dataset's `ifos=`): a plain list is a fixed
+  network, so a slot in one with any geometry drawn is refused by name, and one with all of it fixed is a custom
+  detector in every example. `gf.Detectors` adds how many detectors each example has (`network/count`) and which
   (`network/subset`; a count its distribution's type or bounds would draw outside 1 to the detectors is refused
   when the Detectors are made); an absent detector keeps its noise, receives no signal and adds nothing to the network SNR a
   signal is scaled to. Each example is projected onto its own network (`gf.ExampleNetworks`, the library's

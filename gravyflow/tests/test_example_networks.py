@@ -131,10 +131,35 @@ def test_a_slots_geometry_at_its_ranges_ends_is_kept():
                            longitude_radians=7.0, x_angle_radians=-20.0)  # longitude and azimuth wrap
     assert slot.max_geocentre_distance_meters() == WGS84_EQUATORIAL_RADIUS_METERS + 10_000.0
 
+
+def test_a_plain_list_with_a_drawn_slot_is_refused():
+    """A plain list of detectors is a fixed network; a slot whose geometry is drawn goes in gf.Detectors."""
+    drawn = [gf.IFO.H1, gf.DetectorSlot("D0", noise_curve=gf.IFO.H1, latitude_radians=0.3, longitude_radians=1.0,
+                                        x_angle_radians=uniform(0.0, 1.0))]
+    with pytest.raises(ValueError, match=r"geometry of the detector slots \['D0'\] is drawn"):
+        dataset(drawn)
+    with pytest.raises(ValueError, match=r"geometry of the detector slots \['D0', 'D1'\] is drawn"):
+        dataset(slots(2))
+    with pytest.raises(ValueError, match=r"geometry of the detector slots \['D0'\] is drawn"):
+        gf.Dataset(seed=5, group="train", noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=slots(1)),
+                   waveform_generators=[wnb()], sample_rate_hertz=SAMPLE_RATE, onsource_duration_seconds=1.0,
+                   offsource_duration_seconds=4.0, num_examples_per_batch=BATCH, input_variables=[RV.ONSOURCE])
+
+
+def test_a_plain_list_with_a_fixed_slot_is_a_fixed_network():
+    """A slot with all its geometry fixed is a custom detector: every example has it, in a plain list too."""
+    fixed = gf.DetectorSlot("D0", noise_curve=gf.IFO.H1, latitude_radians=0.3, longitude_radians=1.0,
+                            x_angle_radians=0.2)
+    assert not fixed.drawn and gf.DetectorSlot("D1", noise_curve=gf.IFO.H1).drawn
+    ds = dataset([gf.IFO.H1, fixed], inputs=(RV.ONSOURCE, RV.DETECTOR_GEOMETRY))
+    geometry = np.asarray(ds[0][0]["DETECTOR_GEOMETRY"])
+    np.testing.assert_array_equal(geometry, np.broadcast_to(geometry[:1], geometry.shape))
+    np.testing.assert_array_equal(ds[0][1]["INJECTIONS"], dataset(gf.Detectors([gf.IFO.H1, fixed]))[0][1]["INJECTIONS"])
+
 @pytest.mark.parametrize("noise_type", [gf.NoiseType.REAL, gf.NoiseType.PSEUDO_REAL])
 def test_slots_have_no_real_noise(noise_type):
     with pytest.raises(ValueError, match="have no real data"):
-        dataset(slots(2), noise_type=noise_type)
+        dataset(gf.Detectors(slots(2)), noise_type=noise_type)
     with pytest.raises(ValueError, match="slots"):
         gf.NoiseObtainer(noise_type=noise_type).batcher(
             gf.SeedTree(5), "train", sample_rate_hertz=SAMPLE_RATE, onsource_duration_seconds=1.0,
@@ -288,7 +313,7 @@ def test_each_example_has_its_own_reproducible_geometry():
 
 
 def test_a_datasets_examples_have_their_own_networks():
-    ds = dataset(slots(3), inputs=(RV.ONSOURCE, RV.DETECTOR_GEOMETRY, RV.DETECTOR_MASK))
+    ds = dataset(gf.Detectors(slots(3)), inputs=(RV.ONSOURCE, RV.DETECTOR_GEOMETRY, RV.DETECTOR_MASK))
     x0, _ = ds[0]
     x1, _ = ds[1]
     assert x0["DETECTOR_GEOMETRY"].shape == (BATCH, 3, 9) and x0["DETECTOR_MASK"].shape == (BATCH, 3)
@@ -323,7 +348,7 @@ def test_delays_lie_within_the_light_travel_time():
 
 
 def test_placement_allows_for_the_farthest_detector():
-    ds = dataset(slots(2, height_meters=gf.Distribution(min_=0.0, max_=3000.0, type_=gf.DistributionType.UNIFORM)))
+    ds = dataset(gf.Detectors(slots(2, height_meters=uniform(0.0, 3000.0))))
     generator = ds.waveform_generators[0]
     assert generator.network is ds.detectors
     assert generator.detector_margin_seconds() == (WGS84_EQUATORIAL_RADIUS_METERS + 3000.0) / 299792458.0
@@ -423,7 +448,7 @@ def test_incoherent_components_reach_only_present_detectors():
 
 
 def test_the_injection_layer_needs_the_batchs_networks():
-    ds = dataset(slots(2))
+    ds = dataset(gf.Detectors(slots(2)))
     injector = gf.InjectionGenerator(waveform_generators=ds.waveform_generators)
     streams = gf.SeedTree(5).direct(0)
     injections, mask, parameters = injector.generate(
@@ -472,7 +497,7 @@ def test_a_fixed_network_projects_as_it_did():
 
 
 def test_raw_windows_have_no_drawn_network():
-    ds = dataset(slots(2), inputs=(RV.ONSOURCE, RV.DETECTOR_GEOMETRY))
+    ds = dataset(gf.Detectors(slots(2)), inputs=(RV.ONSOURCE, RV.DETECTOR_GEOMETRY))
     with pytest.raises(ValueError, match="no network of their own"):
         ds.model_inputs(np.zeros((1, 2, ds.window_spec.num_onsource_samples), np.float32),
                         np.zeros((1, 2, ds.window_spec.num_offsource_samples), np.float32))

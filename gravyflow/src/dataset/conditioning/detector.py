@@ -1074,6 +1074,12 @@ class DetectorSlot:
                     f"but {value!r} reaches {least:g} to {most:g}."
                 )
 
+    @property
+    def drawn(self) -> bool:
+        """Whether any of the slot's geometry is drawn (a gf.Distribution, or None for the default draw)."""
+        return any(getattr(self, parameter) is None or isinstance(getattr(self, parameter), gf.Distribution)
+                   for parameter in SLOT_GEOMETRY)
+
     def draw(self, num_examples : int, streams) -> Dict[str, np.ndarray]:
         """
         The slot's geometry in ``num_examples`` examples, from the batch's
