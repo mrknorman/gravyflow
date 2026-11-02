@@ -324,6 +324,16 @@ class ReturnVariables(Enum):
     # the batch estimated from its offsource (gf.bns_range_mpc).
     BNS_RANGE_MPC = ReturnVariable(24, (BATCH, IFO))
 
+    # Each example's network, as a model can take it (input_variables): per
+    # detector, its Earth-fixed position in Earth radii (3) and the six
+    # independent components of its response tensor (x x^T - y y^T) / 2 (xx,
+    # yy, zz, xy, xz, yz; gf.ExampleNetworks.features); and 1 where the
+    # detector is in the example's network, else 0. A fixed network gives its
+    # own geometry and every detector, in every example; a dataset given
+    # gf.Detectors, each example's own.
+    DETECTOR_GEOMETRY = ReturnVariable(25, (BATCH, IFO, 9))
+    DETECTOR_MASK = ReturnVariable(26, (BATCH, IFO))
+
     def __lt__(self, other):
         return self.value.index < other.value.index
 
@@ -364,7 +374,7 @@ class WaveformGenerator:
     injection_chance : float = 1.0
     front_padding_duration_seconds : Optional[float] = None
     back_padding_duration_seconds : Optional[float] = None
-    network : Union[List[gf.IFO], gf.Network, Path, None] = None
+    network : Union[List[gf.IFO], gf.Network, gf.Detectors, Path, None] = None
     allow_partially_out_of_window : bool = False
     right_ascension_radians : Union[float, gf.Distribution, None] = None
     declination_radians : Union[float, gf.Distribution, None] = None
@@ -471,13 +481,13 @@ class WaveformGenerator:
         """
         The largest delay between the geocentre and a detector of `network`
         (default the generator's), in seconds: how far a detector's reference
-        time can lie from the placed one. 0.0 without a network.
+        time can lie from the placed one. For gf.Detectors, whose networks are
+        drawn per example, the largest there can be. 0.0 without a network.
         """
         network = self.network if network is None else network
         if network is None:
             return 0.0
-        locations = np.asarray(network.location, dtype=np.float64)
-        return float(np.max(np.linalg.norm(locations, axis=-1))) / 299792458.0
+        return network.max_geocentre_delay_seconds()
 
     def reference_time_window_seconds(self, window_seconds : float, network=None):
         """
@@ -495,7 +505,8 @@ class WaveformGenerator:
     def init_network(cls, network, rng : Optional[np.random.Generator] = None):
         """
         ``network`` as a gf.Network: a list of IFOs, or a config path whose
-        random geometry is drawn from ``rng``.
+        random geometry is drawn from ``rng``. A gf.Detectors (a dataset's,
+        whose networks are drawn per example) is kept as it is.
         """
         match network:
             case list():
@@ -504,7 +515,7 @@ class WaveformGenerator:
             case Path():
                 network = gf.Network.load(network, rng=rng)
                 
-            case None | gf.Network():
+            case None | gf.Network() | gf.Detectors():
                 pass
             
             case _:
@@ -1903,9 +1914,16 @@ class InjectionGenerator:
         streams: BatchStreams,
         epoch: Optional[int] = None,
         steps_per_epoch: Optional[int] = None,
+        networks: Optional["gf.ExampleNetworks"] = None,
     ):
         """
         Scale each generator's injections, project them, and add them to ``onsource``.
+
+        Networks: a generator whose network is a gf.Detectors (a dataset's,
+        drawn per example) is projected onto ``networks``, the batch's draw
+        (``Detectors.sample``), each example onto its own detectors, and none
+        onto an absent one, so an SNR target is the network SNR of the
+        detectors present. Any other generator is projected onto its network.
 
         Randomness: sky and polarisation are drawn from the batch's
         ``sky/{g}`` and ``pol/{g}`` streams, scaling targets from
@@ -2019,6 +2037,13 @@ class InjectionGenerator:
                 raise ValueError(
                     f"{type(generator).__name__} has no network to project onto."
                 )
+            if isinstance(network, gf.Detectors):
+                if networks is None:
+                    raise ValueError(
+                        f"{type(generator).__name__}'s network is a gf.Detectors, drawn per example: "
+                        "pass the batch's draw as networks= (Detectors.sample(n, streams))."
+                    )
+                network = networks
 
             num_inj = ops.shape(raw_waveforms)[0]
             gps_time_seconds = getattr(generator, "reference_gps_time_seconds", None)

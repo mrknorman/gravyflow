@@ -158,6 +158,9 @@ CENSUS = {
     "gf.project_wave": (lambda k: np.asarray(NETWORK.project_wave(at(POLARISATIONS, k), FS, **SKY)) / k,
                         PEAK, False),
     "gf.StreamingMatchedFilter": (_streamed, PEAK, False),
+    "gf.ExampleNetworks": (lambda k: np.asarray(gf.ExampleNetworks.of_network(NETWORK, 2).project_wave(
+        at(POLARISATIONS, k), FS, **{name: np.asarray(value, np.float32) if name != "gps_time_seconds" else value
+                                     for name, value in SKY.items()})) / k, PEAK, False),
 }
 
 #: Measured: each case's worst error over SCALES, by its comparison's metric (relative
@@ -184,6 +187,7 @@ WORST_ERROR = {
     "gf.matched_filter_fft (white)": 7.0e-7,
     "gf.optimal_snr": 6.3e-8,
     "gf.project_wave": 3.0e-7,
+    "gf.ExampleNetworks": 3.0e-7,  # measured with it (2.853e-7), as gf.project_wave
     "gf.psd": 7.6e-7,
     "gf.rolling_pearson": 2.8e-7,
     "gf.scale_to_snr": 3.4e-7,
@@ -214,6 +218,8 @@ EXEMPT = {
     "greenwich_mean_sidereal_time": "takes a GPS time, not strain",
     "IFO": "a detector's name and site",
     "Network": "detector geometry; its project_wave is checked as gf.project_wave",
+    "DetectorSlot": "a detector's geometry distribution and noise curve; takes no strain",
+    "Detectors": "detectors and their per-example draws; takes no strain (ExampleNetworks projects)",
     "NoiseProfile": "an enumeration of noise-curve names",
     "InjectionGenerator": "generates injections at unit scale and scales them to their SNR or HRSS "
                           "target; takes no strain input",

@@ -129,6 +129,34 @@ print(inputs["WHITENED_ONSOURCE"].shape)  # (32, 2, 2048): examples, detectors, 
 
 A dataset is a Keras `PyDataset`: pass it to `model.fit`. Each batch is a pure function of its seed and index.
 
+### Networks drawn per example
+
+A detector slot (`gf.DetectorSlot`) is a detector at no bundled site: its geometry is drawn for each example (by
+default its vertex uniform on the sphere, its x arm's azimuth uniform, its arms level and at right angles; every
+parameter can be a value or a `gf.Distribution`), and its noise, simulated only, comes from streams of its own, with
+the curve a bundled detector has in the noise profile. `gf.Detectors` also draws how many detectors each example has;
+an absent detector keeps its noise, receives no signal and adds nothing to the SNR a signal is scaled to.
+`DETECTOR_GEOMETRY` (each detector's Earth-fixed position in Earth radii and its response tensor's six components)
+and `DETECTOR_MASK` give each example's network, so a model can take them as inputs; a fixed network gives its own
+geometry and every detector. Detectors that repeat a name are refused: they would have identical noise.
+
+```python
+slots = [gf.DetectorSlot(f"D{j}", noise_curve=gf.IFO.H1) for j in range(4)]
+dataset = gf.Dataset(
+    seed=1,
+    group="train",
+    noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.COLORED),
+    ifos=gf.Detectors(slots, num_present=gf.Distribution(
+        min_=2, max_=4, type_=gf.DistributionType.UNIFORM, dtype=int)),
+    waveform_generators=[gf.CBCGenerator(scaling_method=gf.ScalingMethod(uniform(8.0, 15.0), gf.ScalingTypes.SNR))],
+    input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE, gf.ReturnVariables.DETECTOR_GEOMETRY,
+                     gf.ReturnVariables.DETECTOR_MASK],
+    output_variables=[gf.ReturnVariables.INJECTION_PRESENT],
+)
+inputs, _ = dataset[0]
+print(inputs["DETECTOR_GEOMETRY"].shape, inputs["DETECTOR_MASK"].shape)  # (32, 4, 9) (32, 4)
+```
+
 ## 4. Quick start: a CNN on a laptop CPU
 
 One command trains the CNN of Gabbard *et al.* (2017) on simulated binary black hole signals (IMRPhenomD, masses

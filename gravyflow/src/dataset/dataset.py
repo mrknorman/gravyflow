@@ -16,6 +16,7 @@ from keras import ops
 import jax
 import gravyflow as gf
 from gravyflow.src.dataset.conditioning.whiten import whiten
+from gravyflow.src.dataset.conditioning.detector import Detectors, ExampleNetworks
 from gravyflow.src.dataset.tools.psd import SpectralConfig, estimate_psd, MIN_PSD_SEGMENTS
 from gravyflow.src.utils.tensor import (
     crop_samples, replace_nan_and_inf_with_zero, window_samples
@@ -96,6 +97,8 @@ def noise_ifos(ifos, noise_obtainer) -> List:
     The detectors a dataset's noise has, and so its generators' network: the
     dataset's own ``ifos``, else its noise obtainer's, else L1.
     """
+    if isinstance(ifos, Detectors):
+        return ifos.ifos
     if ifos is not None:
         return ensure_list(ifos)
     obtainer_ifos = getattr(noise_obtainer, "ifos", None)
@@ -208,16 +211,44 @@ def freeze_availability(obtainers, ifos) -> None:
             reader.freeze_availability(ifos)
 
 
-def get_max_arrival_time_difference(ifos: List[gf.IFO]) -> float:
+def get_max_arrival_time_difference(detectors: Detectors) -> float:
     """
     The default lag range of ``ROLLING_PEARSON_ONSOURCE`` (s): the largest light
-    travel time between ``ifos``, the detectors the dataset uses (``noise_ifos``;
-    every generator's network is bound to them), never the generators', so
-    noise-only and injection batches have the same shape.
+    travel time there can be between the dataset's detectors (every generator's
+    network is bound to them), never the generators', so noise-only and
+    injection batches have the same shape.
 
     A Python float, because `rolling_pearson` takes it as a static argument.
     """
-    return float(gf.Network(ensure_list(ifos)).max_arrival_time_difference_seconds)
+    return float(detectors.max_arrival_time_difference_seconds)
+
+
+def _dataset_ifos(ifos):
+    """A dataset's own copy of its ``ifos``: a gf.Detectors as it is (frozen), else a list; None stays None."""
+    if ifos is None or isinstance(ifos, Detectors):
+        return ifos
+    return list(ensure_list(ifos))
+
+
+#: The outputs that give each example's network (`ExampleNetworks`).
+NETWORK_VARIABLES = (gf.ReturnVariables.DETECTOR_GEOMETRY, gf.ReturnVariables.DETECTOR_MASK)
+
+
+def dataset_detectors(ifos, noise_ifos: List, obtainers) -> Detectors:
+    """
+    A dataset's detectors as gf.Detectors: its ``ifos`` if they are, else its
+    noise's detectors (``noise_ifos``), all present in every example. No two may
+    share a name (`check_detectors`), and only simulated noise has detector
+    slots; either is refused by name.
+    """
+    detectors = ifos if isinstance(ifos, Detectors) else Detectors(noise_ifos)
+    if detectors.slots and any(reads_real_data(obtainer) for obtainer in obtainers):
+        raise ValueError(
+            f"The detector slots {[slot.name for slot in detectors.slots]} have no real data: a slot's "
+            "noise is simulated (NoiseType.WHITE or COLORED). Real and pseudo-real noise read only the "
+            "bundled detectors."
+        )
+    return detectors
 
 WHITENED_VARIABLES = (
     gf.ReturnVariables.WHITENED_ONSOURCE,
@@ -931,7 +962,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         waveform_generators: Optional[List[Union[gf.CBCGenerator, gf.WNBGenerator]]] = None,
         num_examples_per_generation_batch: Optional[int] = None,
         num_examples_per_batch: Optional[int] = None,
-        ifos: Optional[List[gf.IFO]] = None,
+        ifos: Union[List[Union[gf.IFO, gf.DetectorSlot]], gf.Detectors, None] = None,
         input_variables: Optional[List[Union[gf.WaveformParameters, gf.ReturnVariables]]] = None,
         output_variables: Optional[List[Union[gf.WaveformParameters, gf.ReturnVariables]]] = None,
         mask_history: Optional[List] = None,
@@ -944,6 +975,12 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
     ):
         """
         seed: the root of the seed tree, an integer >= 0 or a gf.SeedTree.
+        ifos: the detectors, one noise channel each, in order: gf.IFOs and
+            gf.DetectorSlots (whose geometry is drawn per example), or a
+            gf.Detectors, which also says how many are present in each
+            example; default the noise obtainer's. No two may share a name.
+            With slots or a detector count, each example is projected onto its
+            own network, and DETECTOR_GEOMETRY and DETECTOR_MASK give it.
         name: the dataset's scope in the seed tree (letters, digits and
             _.:+-). Datasets of one seed and split with different names draw
             independent streams; unnamed, they share them.
@@ -974,7 +1011,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         
         # The dataset's own copies: the caller's objects are never changed.
         self.noise_obtainer = copy.deepcopy(noise_obtainer) if noise_obtainer is not None else gf.NoiseObtainer()
-        self.ifos = list(ensure_list(ifos)) if ifos is not None else None
+        self.ifos = _dataset_ifos(ifos)
         
         # Default to RANDOM mode if not specified
         self.sampling_mode = sampling_mode if sampling_mode is not None else gf.SamplingMode.RANDOM
@@ -982,12 +1019,6 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         self.output_variables = tuple(output_variables or ())
         self.mask_history = mask_history
         self.spectral_config = spectral_config if spectral_config is not None else SpectralConfig()
-        self.pearson_max_lag_seconds = (
-            get_max_arrival_time_difference(self._noise_ifos()) if pearson_max_lag_seconds is None
-            else float(pearson_max_lag_seconds)
-        )
-        if not self.pearson_max_lag_seconds >= 0.0:
-            raise ValueError(f"pearson_max_lag_seconds must be >= 0, got {pearson_max_lag_seconds}.")
 
         # Initialize waveform generators
         self.waveform_generators = (
@@ -996,6 +1027,13 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
 
         # Set network for waveform generators if not provided
         self._set_generator_networks()
+
+        self.pearson_max_lag_seconds = (
+            get_max_arrival_time_difference(self.detectors) if pearson_max_lag_seconds is None
+            else float(pearson_max_lag_seconds)
+        )
+        if not self.pearson_max_lag_seconds >= 0.0:
+            raise ValueError(f"pearson_max_lag_seconds must be >= 0, got {pearson_max_lag_seconds}.")
 
         # Validate settings
         self._validate_settings()
@@ -1011,20 +1049,27 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
 
     def _set_generator_networks(self):
         """
-        Give every generator a network of exactly the noise's detectors, in order.
+        Resolve the dataset's detectors (``detectors``, `dataset_detectors`) and
+        give every generator a network of exactly them, in order.
 
         A generator without a network (the dataset's own copy) gets one built
         from the noise's detectors. A generator with its own network must match
         the noise's detectors; a mismatch would broadcast one projection into
-        several channels or mislabel them, so it raises.
+        several channels or mislabel them, so it raises. Where examples have
+        networks of their own (``Detectors.varies``), every generator's network
+        is the dataset's Detectors, and each batch is projected onto the
+        networks it draws.
         """
         noise_ifos = self._noise_ifos()
+        self.detectors = dataset_detectors(self.ifos, noise_ifos, self._obtainers())
 
         def bind(generator):
-            if generator.network is None:
-                generator.network = gf.Network(noise_ifos)
-            else:
+            if generator.network is not None:
                 check_network_matches_ifos(generator.network, noise_ifos)
+            if self.detectors.varies:
+                generator.network = self.detectors
+            elif generator.network is None:
+                generator.network = gf.Network(noise_ifos)
             return generator
 
         self.waveform_generators = [bind(generator) for generator in self.waveform_generators]
@@ -1036,8 +1081,42 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
             raise ValueError("No return variables requested. What's the point?")
         validate_noise_settings(self.noise_obtainer, self.variables_to_return)
         check_scaling_matches_noise(self.noise_obtainer, self.waveform_generators)
+        self._check_network_variables()
         self._validate_padding_settings()
         self._validate_spectral_settings()
+
+    def _check_network_variables(self):
+        """
+        DETECTOR_GEOMETRY and DETECTOR_MASK give the networks the injections are
+        projected onto: with a fixed network, its generators' networks must be
+        the noise's detectors' own (a generator's network of other geometry
+        would have no one geometry to give).
+        """
+        if self.detectors.varies or not set(NETWORK_VARIABLES) & self.variables_to_return:
+            return
+        for generator in self.waveform_generators:
+            if getattr(generator.network, "ifos", None) is None:
+                raise ValueError(
+                    f"{type(generator).__name__}'s network is geometry of its own, not the noise's "
+                    f"detectors, so DETECTOR_GEOMETRY and DETECTOR_MASK cannot give the network it is "
+                    "projected onto. Leave the generator's network unset, or give the dataset gf.Detectors."
+                )
+
+    def _example_networks(self, streams: BatchStreams) -> Optional[ExampleNetworks]:
+        """
+        The batch's networks: drawn from ``streams`` where examples have their
+        own (``Detectors.sample``); else the fixed network in every example,
+        when an output gives it; else None.
+        """
+        if self.detectors.varies:
+            return self.detectors.sample(self.num_examples_per_batch, streams)
+        if set(NETWORK_VARIABLES) & self.variables_to_return:
+            return self._fixed_networks(self.num_examples_per_batch)
+        return None
+
+    def _fixed_networks(self, num_examples: int) -> ExampleNetworks:
+        """A fixed network (the noise's detectors') in each of ``num_examples`` examples."""
+        return ExampleNetworks.of_network(gf.Network(self._noise_ifos()), num_examples)
 
     def _validate_spectral_settings(self):
         """
@@ -1166,7 +1245,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         }
         # Add ifos to noise_kwargs if provided
         if self.ifos is not None:
-            noise_kwargs['ifos'] = self.ifos
+            noise_kwargs['ifos'] = self._noise_ifos()
 
         self.noise = augmented_batcher(self.noise_obtainer, self.tree, self.group, **noise_kwargs)
 
@@ -1249,6 +1328,8 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
             crop_duration_seconds=self.crop_duration_seconds,
             num_examples_per_batch=self.num_examples_per_batch,
         )
+        # Each example's network, where examples have their own or an output gives it.
+        networks = self._example_networks(streams)
 
         # One PSD per batch: scaling, labels and whitening all read this estimate.
         spectrum = self._batch_spectrum(offsource) if self._needs_spectrum else None
@@ -1264,6 +1345,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
             streams=streams,
             epoch=self._schedule_epoch,
             steps_per_epoch=len(self),
+            networks=networks if self.detectors.varies else None,
         )
 
         whitened_injections = self._process_whitened_injections(scaled_injections, spectrum)
@@ -1285,6 +1367,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
             augmentations=augmentations,
             coincident=self._process_transient_label(coincident),
             bns_range=self._process_bns_range(spectrum),
+            **_network_outputs(networks),
         )
         self.batch_contract.check(
             (self.input_variables, self.output_variables), input_dict, output_dict
@@ -1303,6 +1386,8 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         The model inputs (``input_variables``) of raw windows that hold nothing
         injected: each padded onsource (B, I, ``window_spec.num_onsource_samples``)
         with the offsource just before it (B, I, ``window_spec.num_offsource_samples``).
+        A fixed network's DETECTOR_GEOMETRY and DETECTOR_MASK are its own in
+        every window; a dataset that draws each example's network has none to give.
 
         They are conditioned by the code that conditions a batch's (``_condition``):
         each example's spectrum from its offsource, then whitening, cropping and the
@@ -1311,10 +1396,19 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         """
         spectrum = self._batch_spectrum(offsource) if self._needs_spectrum else None
         conditioned = self._condition(onsource, offsource, spectrum)
+        networks = None
+        if set(NETWORK_VARIABLES) & set(self.input_variables):
+            if self.detectors.varies:
+                raise ValueError(
+                    "Raw windows have no network of their own: this dataset draws each example's "
+                    "(gf.Detectors), so DETECTOR_GEOMETRY and DETECTOR_MASK exist only for its own examples."
+                )
+            networks = self._fixed_networks(int(np.shape(onsource)[0]))
         inputs = create_variable_dictionary(
             self.input_variables, conditioned["onsource"], conditioned["whitened_onsource"],
             conditioned["offsource"], None, None, None, None,
             conditioned["rolling_pearson_onsource"], conditioned["spectrogram_onsource"], None,
+            **_network_outputs(networks),
         )
         missing = [variable.name for variable in self.input_variables if inputs.get(variable.name) is None]
         if missing:
@@ -1473,6 +1567,13 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         
         return input_dict, output_dict
 
+def _network_outputs(networks: Optional[ExampleNetworks]) -> Dict:
+    """DETECTOR_GEOMETRY and DETECTOR_MASK of ``networks`` (None: neither), as `create_variable_dictionary` takes them."""
+    if networks is None:
+        return {}
+    return {"detector_geometry": networks.features(), "detector_mask": networks.present}
+
+
 def _batch_first(value):
     """A generator-first (G, B, ...) array as batch-first (B, G, ...)."""
     return ops.moveaxis(ops.convert_to_tensor(value), 0, 1)
@@ -1498,6 +1599,8 @@ def create_variable_dictionary(
     augmentations = None,
     coincident = None,
     bns_range = None,
+    detector_geometry = None,
+    detector_mask = None,
     ) -> Dict:
     """
     Create dictionary of requested return variables.
@@ -1516,6 +1619,8 @@ def create_variable_dictionary(
         augmentations: AUGMENTATIONS, each example's augmentation flags.
         coincident: COINCIDENT, 1 where an example's detectors were read at one time.
         bns_range: BNS_RANGE_MPC, each example's BNS range per detector.
+        detector_geometry: DETECTOR_GEOMETRY, each example's detectors' geometry.
+        detector_mask: DETECTOR_MASK, which detectors each example has.
     """
     from keras import ops
     
@@ -1538,6 +1643,8 @@ def create_variable_dictionary(
         gf.ReturnVariables.AUGMENTATIONS: augmentations,
         gf.ReturnVariables.COINCIDENT: coincident,
         gf.ReturnVariables.BNS_RANGE_MPC: bns_range,
+        gf.ReturnVariables.DETECTOR_GEOMETRY: detector_geometry,
+        gf.ReturnVariables.DETECTOR_MASK: detector_mask,
     }
 
     # Add WaveformParameters from injection_parameters
@@ -1672,7 +1779,7 @@ class ComposedDataset(GravyflowDataset):
         scale_factor: None = None,
         num_examples_per_generation_batch: Optional[int] = None,
         num_examples_per_batch: Optional[int] = None,
-        ifos: Optional[List[gf.IFO]] = None,
+        ifos: Union[List[Union[gf.IFO, gf.DetectorSlot]], gf.Detectors, None] = None,
         input_variables: Optional[List[Union[gf.WaveformParameters, gf.ReturnVariables]]] = None,
         output_variables: Optional[List[Union[gf.WaveformParameters, gf.ReturnVariables]]] = None,
         steps_per_epoch: int = 1000,
@@ -1691,8 +1798,8 @@ class ComposedDataset(GravyflowDataset):
             scale_factor: Deprecated and ignored: the data are physical strain.
             num_examples_per_generation_batch: Batch size for waveform generation.
             num_examples_per_batch: Batch size for returned data.
-            ifos: the detectors of every pool; default the detectors the
-                pools' sources share, else L1.
+            ifos: the detectors of every pool, as GravyflowDataset's (gf.Detectors
+                included); default the detectors the pools' sources share, else L1.
             input_variables: Variables to include in input dict.
             output_variables: Variables to include in output dict.
             steps_per_epoch: Number of batches per epoch.
@@ -1713,7 +1820,7 @@ class ComposedDataset(GravyflowDataset):
         self.crop_duration_seconds = crop_duration_seconds if crop_duration_seconds is not None else Defaults.crop_duration_seconds
         self.num_examples_per_generation_batch = num_examples_per_generation_batch if num_examples_per_generation_batch is not None else Defaults.num_examples_per_generation_batch
         self.num_examples_per_batch = num_examples_per_batch if num_examples_per_batch is not None else Defaults.num_examples_per_batch
-        self.ifos = list(ensure_list(ifos)) if ifos is not None else None
+        self.ifos = _dataset_ifos(ifos)
         self.sampling_mode = gf.SamplingMode.RANDOM
         self.input_variables = tuple(input_variables or ())
         self.output_variables = tuple(output_variables or ())
@@ -1754,7 +1861,7 @@ class ComposedDataset(GravyflowDataset):
         detectors the pools' sources share, else L1.
         """
         if self.ifos is not None:
-            return self.ifos
+            return noise_ifos(self.ifos, None)
         sources = {}
         for obtainer in self._obtainers():
             ifos = getattr(obtainer, "ifos", None)
@@ -1774,6 +1881,7 @@ class ComposedDataset(GravyflowDataset):
             raise ValueError("No return variables requested. What's the point?")
         for obtainer in self._obtainers():
             validate_noise_settings(obtainer, self.variables_to_return)
+        self._check_network_variables()
         self._validate_padding_settings()
         self._validate_spectral_settings()
 

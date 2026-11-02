@@ -15,7 +15,9 @@ import jax
 
 import gravyflow as gf
 
-from gravyflow.src.dataset.conditioning.detector import DEFAULT_NOISE_PROFILE, read_noise_curve
+from gravyflow.src.dataset.conditioning.detector import (
+    DEFAULT_NOISE_PROFILE, DetectorSlot, check_detectors, read_noise_curve,
+)
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from gravyflow.src.dataset.config import WindowSpec, batch_size, ignore_scale_factor
 from gravyflow.src.rng import BatchStreams, SeedTree
@@ -44,8 +46,11 @@ def unit_normal_noise(
     Unit Gaussian noise, (Batch, IFO, Samples), float32.
 
     Each detector's noise comes from its own stream, ``noise/{IFO}/{window}``,
-    so adding a detector changes no other detector's noise.
+    so adding a detector changes no other detector's noise. Detectors are
+    keyed by name, so detectors that repeat a name are refused
+    (`check_detectors`): they would have identical noise.
     """
+    check_detectors(ifos)
     return jnp.stack([
         jax.random.normal(
             streams.key(f"noise/{ifo.name}/{window}"),
@@ -305,7 +310,7 @@ class NoiseObtainer(Obtainer):
             crop_duration_seconds : float = None,
             offsource_duration_seconds : float = None,
             num_examples_per_batch : int = None,
-            ifos: List[gf.IFO] = None,
+            ifos: List[Union[gf.IFO, DetectorSlot]] = None,
             scale_factor : None = None,
             sampling_mode : "gf.SamplingMode" = None,
             steps_per_epoch : int = None,
@@ -341,7 +346,13 @@ class NoiseObtainer(Obtainer):
             sampling_mode = gf.SamplingMode.RANDOM
         # The detectors for this call only: the obtainer's own `ifos` is never
         # overwritten, so one obtainer can serve datasets with different detectors.
-        ifos = gf.src.utils.numerics.ensure_list(ifos) if ifos is not None else list(self.ifos)
+        ifos = check_detectors(gf.src.utils.numerics.ensure_list(ifos) if ifos is not None else self.ifos)
+        slots = [ifo.name for ifo in ifos if isinstance(ifo, DetectorSlot)]
+        if slots and self.noise_type not in (NoiseType.WHITE, NoiseType.COLORED):
+            raise ValueError(
+                f"The detector slots {slots} have no {self.noise_type.name} noise: a slot's noise is "
+                "simulated (NoiseType.WHITE or COLORED)."
+            )
 
         match self.noise_type:
             case NoiseType.WHITE:

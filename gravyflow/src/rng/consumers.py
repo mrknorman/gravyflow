@@ -36,6 +36,11 @@ _LEAVES = tuple(re.compile(pattern) for pattern in (
     rf"inject/{_SEGMENT}/shift",
     rf"(sky|pol|scale)/{_SEGMENT}",
     r"pool/assign",
+    # A dataset's networks drawn per example (gf.Detectors): one stream per
+    # detector slot and geometry parameter, so adding a slot or a parameter
+    # moves no other's; how many detectors each example has, and which.
+    rf"network/{_SEGMENT}/{_SEGMENT}",
+    r"network/(count|subset)",
     # A standard dataset's injection sets, one stream per parameter
     # (gravyflow.src.dataset.standard.population).
     rf"standard/(volume|snr)/{_SEGMENT}",

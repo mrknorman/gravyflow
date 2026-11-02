@@ -51,6 +51,9 @@ gravyflow runs on Keras's JAX backend. Set `KERAS_BACKEND=jax` before Keras is i
 - `Obtainer`: the base of the data obtainers (noise and transients).
 - `IFO`: the detectors gravyflow knows.
 - `Network`: a network of detectors, and the projection of waves onto it.
+- `DetectorSlot`: a detector at no bundled site, its geometry drawn per example, with noise of its own.
+- `Detectors`: a dataset's detectors when each example has its own network: bundled detectors and slots, and how many are present.
+- `ExampleNetworks`: each example's network in one batch, and the projection of each example onto its own.
 - `NoiseProfile`: a named set of per-detector noise curves for coloured noise (bundled with the package).
 - `project_wave`: project polarisations onto detectors.
 - `greenwich_mean_sidereal_time`: GMST at a GPS time.

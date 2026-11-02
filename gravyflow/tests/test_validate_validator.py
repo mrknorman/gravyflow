@@ -703,6 +703,26 @@ def test_the_validator_scores_injections_on_two_detectors(tmp_path):
     v.plot(tmp_path / "report.html")
 
 
+@pytest.mark.parametrize("mode", ["stream", "window"])
+def test_the_validator_validates_a_model_that_takes_the_network(mode, tmp_path):
+    # A model fed each example's network (gf.Detectors' datasets) is validated on a fixed one: its
+    # geometry and mask are the network's own in every window, raw ones included (model_inputs).
+    RV = gf.ReturnVariables
+    strain = keras.Input(shape=(2, SAMPLES), name="WHITENED_ONSOURCE")
+    geometry = keras.Input(shape=(2, 9), name="DETECTOR_GEOMETRY")
+    present = keras.Input(shape=(2,), name="DETECTOR_MASK")
+    features = keras.layers.Concatenate()(
+        [keras.layers.Flatten()(strain), keras.layers.Flatten()(geometry), present])
+    outputs = keras.layers.Dense(2, name="output", kernel_initializer=keras.initializers.GlorotUniform(seed=1))(features)
+    model = keras.Model({"WHITENED_ONSOURCE": strain, "DETECTOR_GEOMETRY": geometry, "DETECTOR_MASK": present}, outputs)
+    args = validation_dataset_args(config=ValidationDatasetConfig(sample_rate_hertz=2048.0, ifos=[gf.IFO.H1, gf.IFO.L1]))
+    args["input_variables"] = [RV.WHITENED_ONSOURCE, RV.DETECTOR_GEOMETRY, RV.DETECTOR_MASK]
+    extra = {"snr_range": (0.0, 15.0)} if mode == "window" else {}
+    v = Validator.validate(model, "network", args, ValidationConfig(mode=mode, num_examples=32, batch_size=32, **extra),
+                           tmp_path / "v.h5")
+    assert v.far_scores.shape == (32,) and np.all(np.isfinite(v.far_scores))
+
+
 def test_the_validator_scores_real_events(dataset_args, offline_events):
     # The real-event stage scores every confident event, once: real events are test data.
     config = ValidationConfig(mode="window", num_examples=32, batch_size=32, score_real_events=True)

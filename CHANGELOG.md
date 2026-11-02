@@ -138,6 +138,20 @@ repository before it may need the changes below.
 
 ### Added
 
+- **Networks drawn per example.** `gf.DetectorSlot` is a detector at no bundled site: its geometry is drawn per
+  example from streams of its own (`network/{slot}/{parameter}`; by default its vertex uniform on the sphere, its x
+  arm's azimuth uniform, an opening angle of pi / 2, level arms, every parameter a value or a `gf.Distribution`), and
+  its simulated noise from its own (`noise/{slot}/{on,off}`), with the curve its `noise_curve` has in the noise
+  profile. `gf.Detectors` (a dataset's `ifos=`) adds how many detectors each example has (`network/count`) and which
+  (`network/subset`); an absent detector keeps its noise, receives no signal and adds nothing to the network SNR a
+  signal is scaled to. Each example is projected onto its own network (`gf.ExampleNetworks`, the library's
+  projection vectorised over examples), and placement allows for the farthest a detector can be (the WGS84
+  equatorial radius plus a slot's greatest height). `ReturnVariables.DETECTOR_GEOMETRY` (B, I, 9: each detector's
+  Earth-fixed position in Earth radii and its response tensor's six components) and `DETECTOR_MASK` (B, I) give each
+  example's network as model inputs; a fixed network gives its own geometry and every detector, in raw windows too
+  (`model_inputs`), so the validator validates such a model. Fixed networks project and draw exactly as before.
+  `geodetic_to_earth_fixed` is WGS84's closed form, vectorised (astropy's to under a millimetre).
+
 - **Wrapping time slides and the per-detector path.** `WrappedSlides` (`gravyflow.src.validate`) lays the network's
   segments end to end as one ring; in slide k detector j is read `j lag_k` further round it, wrapping round each
   segment's end into the next and from the last back to the first, so no data is lost to a slide and K slides give K
@@ -393,6 +407,10 @@ repository before it may need the changes below.
   format version is not bumped again, and a record written before it has no 3D tab.
 
 ### Fixed
+
+- **Detectors that repeat a name are refused.** A detector's noise streams are named for it, so a dataset or noise
+  batcher given one detector twice (H1 and H1) served identical noise in both channels, silently; it is refused by
+  name. Independent detectors with one curve are `gf.DetectorSlot`s.
 
 - **The CBC generator refuses a spin past the Kerr bound.** `_generate_cbc_window` and `time_to_merger_seconds`
   accepted any spin vector, so a corner of separately bounded components, such as (0.8, 0, 0.8) at |chi| = 1.13,

@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Union, List, Dict, Tuple, Optional
 from dataclasses import dataclass
 from enum import Enum, IntEnum
+from functools import cached_property
 import json
 import os
 import logging
@@ -13,6 +14,7 @@ import jax
 import numpy as np
 from astropy import coordinates, units
 from gravyflow.src.resources import RESOURCES
+from gravyflow.src.rng.consumers import check_name
 from gravyflow.src.utils.tensor import rfftfreq
 
 import gravyflow as gf
@@ -312,6 +314,112 @@ def project_wave(
 
     return shifted_waveoform
 
+@jax.jit
+def get_time_delay_per_example(right_ascension, declination, location, gmst_radians):
+    """
+    ``get_time_delay_`` with each source seen by its own detectors: angles and
+    ``gmst_radians`` (Batch,), ``location`` (Batch, Detectors, 3). Returns
+    (Batch, Detectors).
+    """
+    def one(ra, dec, loc, gmst):
+        return get_time_delay_(ra[None], dec[None], loc, gmst[None])[0]
+
+    return jax.vmap(one)(right_ascension, declination, location, gmst_radians)
+
+
+@jax.jit(static_argnames=["sample_rate_hertz"])
+def project_wave_per_example(
+        strain,
+        sample_rate_hertz : float,
+        x_vector,
+        y_vector,
+        x_length_meters,
+        y_length_meters,
+        x_response,
+        y_response,
+        response,
+        location,
+        right_ascension,
+        declination,
+        polarization,
+        gmst_radians
+    ):
+    """
+    ``project_wave`` with each example projected onto its own detectors: every
+    geometry argument is (Batch, Detectors, ...), the angles and
+    ``gmst_radians`` are (Batch,), and ``strain`` is (Batch, 2, Time), or
+    (Batch, Detectors, 2, Time) for a waveform per detector. Returns (Batch,
+    Detectors, Time).
+    """
+    def one(s, xv, yv, xl, yl, xr, yr, r, loc, ra, dec, pol, gmst):
+        return project_wave(
+            s[None], sample_rate_hertz, xv, yv, xl, yl, xr, yr, r, loc,
+            ra[None], dec[None], pol[None], gmst_radians=gmst[None]
+        )[0]
+
+    return jax.vmap(one)(
+        strain, x_vector, y_vector, x_length_meters, y_length_meters, x_response,
+        y_response, response, location, right_ascension, declination, polarization, gmst_radians
+    )
+
+
+def arm_tensors(longitude, latitude, x_azimuth, y_azimuth, x_altitude, y_altitude):
+    """
+    A detector's arm unit vectors and response tensors in Earth-fixed
+    coordinates, as lal's XLALCreateDetector builds them, in float64: each arm
+    has an azimuth (radians clockwise from North) and an altitude above the
+    local horizontal at the vertex's geodetic ``longitude`` and ``latitude``.
+
+    Every argument is an array of one shape, one value per detector. Returns
+    the x and y arms (shape + (3,)), their responses x x^T / 2 and y y^T / 2,
+    and the detector's response (x x^T - y y^T) / 2 (shape + (3, 3)).
+    """
+    lon, lat = longitude, latitude
+
+    def arm(azimuth, altitude):
+        u_north = np.cos(altitude) * np.cos(azimuth)
+        u_east = np.cos(altitude) * np.sin(azimuth)
+        u_up = np.sin(altitude)
+        u_rho = -np.sin(lat) * u_north + np.cos(lat) * u_up
+        return np.stack([
+            np.cos(lon) * u_rho - np.sin(lon) * u_east,
+            np.sin(lon) * u_rho + np.cos(lon) * u_east,
+            np.cos(lat) * u_north + np.sin(lat) * u_up,
+        ], axis=-1)
+
+    x_arm = arm(x_azimuth, x_altitude)
+    y_arm = arm(y_azimuth, y_altitude)
+    x_response = 0.5 * np.einsum("...i,...j->...ij", x_arm, x_arm)
+    y_response = 0.5 * np.einsum("...i,...j->...ij", y_arm, y_arm)
+    return x_arm, y_arm, x_response, y_response, x_response - y_response
+
+
+# WGS84, the reference ellipsoid of lal's detector vertices and of astropy's
+# geodetic coordinates: its equatorial radius (m) and flattening.
+WGS84_EQUATORIAL_RADIUS_METERS = 6378137.0
+WGS84_FLATTENING = 1.0 / 298.257223563
+
+
+def geodetic_to_earth_fixed(longitude, latitude, height):
+    """
+    Earth-fixed (geocentric Cartesian) coordinates, in metres, of points at
+    WGS84 geodetic ``longitude`` and ``latitude`` (radians) and ``height``
+    above the ellipsoid (metres): arrays of one shape, computed in float64.
+    Returns shape + (3,). The closed form of astropy's
+    ``EarthLocation.from_geodetic`` (ERFA's gd2gc), vectorised.
+    """
+    longitude, latitude, height = (np.asarray(value, dtype=np.float64) for value in (longitude, latitude, height))
+    eccentricity_squared = WGS84_FLATTENING * (2.0 - WGS84_FLATTENING)
+    sin_latitude = np.sin(latitude)
+    # The prime vertical radius of curvature.
+    normal = WGS84_EQUATORIAL_RADIUS_METERS / np.sqrt(1.0 - eccentricity_squared * sin_latitude ** 2)
+    return np.stack([
+        (normal + height) * np.cos(latitude) * np.cos(longitude),
+        (normal + height) * np.cos(latitude) * np.sin(longitude),
+        (normal * (1.0 - eccentricity_squared) + height) * sin_latitude,
+    ], axis=-1)
+
+
 @dataclass
 class IFO_:
     """Data class to represent information about an Interferometer."""
@@ -395,18 +503,21 @@ class NoiseProfile(Enum):
     DESIGN = {"Hanford": _ALIGO_DESIGN, "Livingston": _ALIGO_DESIGN, "Virgo": _ADVIRGO_DESIGN}
     ZERO_DET_HIGH_POWER = {"Hanford": _ALIGO_ZERO_DET_HIGH_POWER, "Livingston": _ALIGO_ZERO_DET_HIGH_POWER}
 
-    def covers(self, ifo: "IFO") -> bool:
-        """Whether this profile has a curve for ``ifo``."""
-        return ifo.value.name in self.value
+    def covers(self, ifo: Union["IFO", "DetectorSlot"]) -> bool:
+        """Whether this profile has a curve for ``ifo`` (a slot: its ``noise_curve``'s)."""
+        return noise_curve_of(ifo).value.name in self.value
 
-    def path(self, ifo: "IFO") -> Path:
-        """The ASD file of this profile for ``ifo``; ValueError, by name, for a detector it does not cover."""
+    def path(self, ifo: Union["IFO", "DetectorSlot"]) -> Path:
+        """
+        The ASD file of this profile for ``ifo``, a bundled detector or a slot (its
+        ``noise_curve``'s); ValueError, by name, for a detector it does not cover.
+        """
         if not self.covers(ifo):
             raise ValueError(
                 f"The noise profile {self.name} has no curve for {ifo.name}: it covers "
                 f"{', '.join(sorted(self.value))}. Choose a profile that covers every detector."
             )
-        return NOISE_PROFILE_DIRECTORY_PATH / self.value[ifo.value.name]
+        return NOISE_PROFILE_DIRECTORY_PATH / self.value[noise_curve_of(ifo).value.name]
 
 
 #: The profile of coloured noise when none is named; each IFO's
@@ -609,33 +720,15 @@ class Network:
         if y_altitude_radians is None:
             y_altitude_radians = ops.zeros_like(y_angle_radians)
 
-        # The arm unit vectors and the response tensor in Earth-fixed
-        # coordinates, as lal's XLALCreateDetector builds them: each arm has an
-        # azimuth (clockwise from North) and an altitude above the local
-        # horizontal, and the response is (x x^T - y y^T) / 2.
         def f64(value):
             return np.asarray(value, dtype=np.float64).reshape(-1)
 
-        lon, lat = f64(longitude_radians), f64(latitude_radians)
-
-        def arm(azimuth, altitude):
-            u_north = np.cos(altitude) * np.cos(azimuth)
-            u_east = np.cos(altitude) * np.sin(azimuth)
-            u_up = np.sin(altitude)
-            u_rho = -np.sin(lat) * u_north + np.cos(lat) * u_up
-            return np.stack([
-                np.cos(lon) * u_rho - np.sin(lon) * u_east,
-                np.sin(lon) * u_rho + np.cos(lon) * u_east,
-                np.cos(lat) * u_north + np.sin(lat) * u_up,
-            ], axis=-1)
-
-        x_arm = arm(f64(x_angle_radians), f64(x_altitude_radians))
-        y_arm = arm(f64(y_angle_radians), f64(y_altitude_radians))
-        x_arm_response = 0.5 * np.einsum("ni,nj->nij", x_arm, x_arm)
-        y_arm_response = 0.5 * np.einsum("ni,nj->nij", y_arm, y_arm)
-        full_response = ops.convert_to_tensor(
-            x_arm_response - y_arm_response, dtype="float32"
+        x_arm, y_arm, x_arm_response, y_arm_response, response = arm_tensors(
+            f64(longitude_radians), f64(latitude_radians),
+            f64(x_angle_radians), f64(y_angle_radians),
+            f64(x_altitude_radians), f64(y_altitude_radians),
         )
+        full_response = ops.convert_to_tensor(response, dtype="float32")
 
         # Handling the coordinates.EarthLocation method
         # This part requires numpy/cpu execution as astropy is not differentiable/JAX-native
@@ -879,6 +972,11 @@ class Network:
                     return project_wave(*args, **kwargs)
             raise
     
+    def max_geocentre_delay_seconds(self) -> float:
+        """The largest delay between the geocentre and a detector of the network, in seconds."""
+        locations = np.asarray(self.location, dtype=np.float64)
+        return float(np.max(np.linalg.norm(locations, axis=-1))) / 299792458.0
+
     def calculate_max_arrival_time_difference(self):
         """
         Compute pairwise distances between each points.
@@ -899,3 +997,432 @@ class Network:
         max_distance = ops.max(self.distances)
         
         self.max_arrival_time_difference_seconds = max_distance/C
+
+
+def noise_curve_of(detector: Union[IFO, "DetectorSlot"]) -> IFO:
+    """The bundled detector whose noise curve ``detector`` has: itself, or a slot's ``noise_curve``."""
+    return detector.noise_curve if isinstance(detector, DetectorSlot) else detector
+
+
+#: The geometry parameters of a detector slot, as a Network's dict names them
+#: (``opening_angle_radians`` gives its y arm's azimuth). Those that default to
+#: None are drawn isotropically.
+SLOT_GEOMETRY = (
+    "latitude_radians", "longitude_radians", "x_angle_radians", "opening_angle_radians",
+    "height_meters", "x_length_meters", "y_length_meters", "x_altitude_radians", "y_altitude_radians",
+)
+
+
+def _isotropic_draw(parameter: str, num_examples: int, rng: np.random.Generator) -> np.ndarray:
+    """A slot's default draw of ``parameter``: the vertex uniform on the sphere, the azimuth uniform."""
+    if parameter == "latitude_radians":
+        return np.arcsin(2.0 * rng.random(num_examples) - 1.0)
+    if parameter == "longitude_radians":
+        return np.pi * (2.0 * rng.random(num_examples) - 1.0)
+    return 2.0 * np.pi * rng.random(num_examples)
+
+
+def _upper_bound(value, name: str) -> float:
+    """The largest value ``value`` (a float or a gf.Distribution) can take; ValueError if it has none."""
+    if isinstance(value, gf.Distribution):
+        if value.type_ == gf.DistributionType.CONSTANT:
+            return float(value.value)
+        if value.type_ == gf.DistributionType.CHOICE:
+            return float(np.max(value.possible_values))
+        if value.max_ is None:
+            raise ValueError(
+                f"{name} needs a largest value: injections are placed so that a signal delayed to the "
+                "farthest detector stays in the window. Give its distribution a max_."
+            )
+        return float(value.max_)
+    return float(value)
+
+
+@dataclass(frozen=True)
+class DetectorSlot:
+    """
+    A detector that is none of the bundled sites: its geometry is drawn for
+    each example, and it has noise of its own.
+
+    Noise: simulated (WHITE or COLORED) only, from the slot's own streams,
+    ``noise/{name}/{on,off}``, so no two detectors share noise; COLORED noise
+    has the curve that ``noise_curve`` (a bundled detector) has in the noise
+    profile. Real noise has no slots.
+
+    Geometry, drawn per example: each parameter is a float, a gf.Distribution
+    drawn from the slot's stream ``network/{name}/{parameter}``, or (the
+    site and the azimuth) None, the default. By default the vertex is uniform
+    on the sphere (sin latitude uniform in [-1, 1), longitude in [-pi, pi)), on
+    the WGS84 ellipsoid (height 0 m); the x arm's azimuth (radians clockwise
+    from North) is uniform in [0, 2 pi); the y arm lies
+    ``opening_angle_radians`` anticlockwise of it seen from above, as the
+    bundled detectors' arms do (pi / 2; pi / 3 for a triangle's detector); the
+    arms are level. Arm lengths enter no projection.
+
+    A slot's ``name`` is its own: none of the bundled detectors' (L1, H1, V1).
+    """
+    name : str
+    noise_curve : IFO
+    latitude_radians : Union[float, "gf.Distribution", None] = None
+    longitude_radians : Union[float, "gf.Distribution", None] = None
+    x_angle_radians : Union[float, "gf.Distribution", None] = None
+    opening_angle_radians : Union[float, "gf.Distribution"] = np.pi / 2.0
+    height_meters : Union[float, "gf.Distribution"] = 0.0
+    x_length_meters : Union[float, "gf.Distribution"] = 4000.0
+    y_length_meters : Union[float, "gf.Distribution"] = 4000.0
+    x_altitude_radians : Union[float, "gf.Distribution"] = 0.0
+    y_altitude_radians : Union[float, "gf.Distribution"] = 0.0
+
+    def __post_init__(self):
+        check_name(self.name, "detector slot name")
+        if self.name in IFO.__members__:
+            raise ValueError(
+                f"A detector slot cannot be named {self.name}: L1, H1 and V1 are the bundled detectors, "
+                "and a slot's noise streams are its own. Give the slot another name."
+            )
+        if not isinstance(self.noise_curve, IFO):
+            raise TypeError(
+                f"A detector slot's noise_curve is the bundled detector (a gf.IFO) whose noise curve it "
+                f"has, not {self.noise_curve!r}."
+            )
+        for parameter in SLOT_GEOMETRY:
+            value = getattr(self, parameter)
+            if isinstance(value, gf.Distribution) or (value is None and parameter in SLOT_GEOMETRY[:3]):
+                continue
+            if isinstance(value, (int, float, np.integer, np.floating)) and not isinstance(value, bool):
+                object.__setattr__(self, parameter, float(value))
+                continue
+            raise TypeError(
+                f"A detector slot's {parameter} is a float or a gf.Distribution"
+                f"{', or None for its default draw' if parameter in SLOT_GEOMETRY[:3] else ''}; got {value!r}."
+            )
+
+    def draw(self, num_examples : int, streams) -> Dict[str, np.ndarray]:
+        """
+        The slot's geometry in ``num_examples`` examples, from the batch's
+        ``streams`` (a gf.BatchStreams): each parameter (B,), float32, as a
+        Network's dict takes them, with the y arm's azimuth,
+        ``y_angle_radians``, from the x arm's and the opening angle.
+        """
+        drawn = {}
+        for parameter in SLOT_GEOMETRY:
+            value = getattr(self, parameter)
+            if isinstance(value, float):
+                values = np.full(num_examples, value)
+            else:
+                rng = streams.stream(f"network/{self.name}/{parameter}")
+                values = _isotropic_draw(parameter, num_examples, rng) if value is None \
+                    else value.sample(num_examples, rng)
+            drawn[parameter] = np.asarray(values, dtype=np.float32)
+        opening = drawn.pop("opening_angle_radians")
+        drawn["y_angle_radians"] = (
+            drawn["x_angle_radians"].astype(np.float64) - opening.astype(np.float64)
+        ).astype(np.float32)
+        return drawn
+
+    def max_geocentre_distance_meters(self) -> float:
+        """The farthest the slot's vertex can be from the geocentre: the equatorial radius plus its greatest height."""
+        return WGS84_EQUATORIAL_RADIUS_METERS + max(_upper_bound(self.height_meters, f"{self.name}'s height_meters"), 0.0)
+
+
+def detector_geometry(parameters : Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    """
+    The geometry a projection reads, float32, from a detector's geometry
+    parameters (arrays of one shape, as a Network's dict names them, angles in
+    radians): its Earth-fixed ``location`` (m), arm unit vectors, arm lengths
+    and response tensors, as a Network computes them, with the vertex placed
+    by the vectorised WGS84 conversion (``geodetic_to_earth_fixed``).
+    """
+    def f64(name):
+        return np.asarray(parameters[name], dtype=np.float64)
+
+    x_arm, y_arm, x_response, y_response, response = arm_tensors(
+        f64("longitude_radians"), f64("latitude_radians"),
+        f64("x_angle_radians"), f64("y_angle_radians"),
+        f64("x_altitude_radians"), f64("y_altitude_radians"),
+    )
+    location = geodetic_to_earth_fixed(f64("longitude_radians"), f64("latitude_radians"), f64("height_meters"))
+    geometry = {
+        "x_vector": x_arm, "y_vector": y_arm,
+        "x_length_meters": f64("x_length_meters"), "y_length_meters": f64("y_length_meters"),
+        "x_response": x_response, "y_response": y_response, "response": response,
+        "location": location,
+    }
+    return {name: value.astype(np.float32) for name, value in geometry.items()}
+
+
+#: The Earth radius the geometry features measure positions in: WGS84's equatorial radius.
+GEOMETRY_FEATURE_RADIUS_METERS = WGS84_EQUATORIAL_RADIUS_METERS
+
+#: The response tensor's six independent components, in the order of the geometry features.
+_RESPONSE_COMPONENTS = ((0, 0), (1, 1), (2, 2), (0, 1), (0, 2), (1, 2))
+
+
+@dataclass(frozen=True, eq=False)
+class ExampleNetworks:
+    """
+    The network of each example of one batch: each detector's geometry, as a
+    Network holds it but per example, (Batch, Detectors, ...) float32, and
+    ``present`` (Batch, Detectors), 1.0 where the detector is in the example's
+    network and 0.0 where it is not.
+
+    ``project_wave`` and ``get_time_delay`` take a Network's arguments, one
+    source per example: each example is projected onto its own detectors, and
+    an absent detector receives no signal.
+    """
+    x_vector : jnp.ndarray
+    y_vector : jnp.ndarray
+    x_length_meters : jnp.ndarray
+    y_length_meters : jnp.ndarray
+    x_response : jnp.ndarray
+    y_response : jnp.ndarray
+    response : jnp.ndarray
+    location : jnp.ndarray
+    present : jnp.ndarray
+
+    #: The geometry arrays, in project_wave's order.
+    GEOMETRY = ("x_vector", "y_vector", "x_length_meters", "y_length_meters",
+                "x_response", "y_response", "response", "location")
+
+    @classmethod
+    def stack(cls, columns : List[Dict[str, np.ndarray]], present) -> "ExampleNetworks":
+        """Each detector's geometry (a dict of (Batch, ...) arrays, ``detector_geometry``'s), stacked on axis 1."""
+        return cls(
+            **{name: jnp.asarray(np.stack([column[name] for column in columns], axis=1), dtype=jnp.float32)
+               for name in cls.GEOMETRY},
+            present=jnp.asarray(present, dtype=jnp.float32),
+        )
+
+    @classmethod
+    def of_network(cls, network : "Network", num_examples : int) -> "ExampleNetworks":
+        """``network``'s fixed geometry in each of ``num_examples`` examples, every detector present."""
+        def tiled(value):
+            value = jnp.asarray(value, dtype=jnp.float32)
+            return jnp.broadcast_to(value, (num_examples,) + value.shape)
+
+        return cls(
+            **{name: tiled(getattr(network, name)) for name in cls.GEOMETRY},
+            present=jnp.ones((num_examples, int(network.num_detectors)), dtype=jnp.float32),
+        )
+
+    @property
+    def num_examples(self) -> int:
+        return int(self.location.shape[0])
+
+    @property
+    def num_detectors(self) -> int:
+        return int(self.location.shape[1])
+
+    def _per_example(self, **angles) -> List:
+        """Each angle as float32, one per example; ValueError, by name, for any other shape."""
+        converted = []
+        for name, angle in angles.items():
+            angle = ops.convert_to_tensor(angle, dtype="float32")
+            if tuple(ops.shape(angle)) != (self.num_examples,):
+                raise ValueError(
+                    f"{name} must be one angle per example, ({self.num_examples},); got {tuple(ops.shape(angle))}."
+                )
+            converted.append(angle)
+        return converted
+
+    def get_time_delay(self, right_ascension, declination, gps_time_seconds=None):
+        """Arrival time at each example's detectors minus at the geocentre, (Batch, Detectors), as Network's."""
+        right_ascension, declination = self._per_example(right_ascension=right_ascension, declination=declination)
+        return get_time_delay_per_example(
+            right_ascension, declination, self.location, Network.gmst_radians(gps_time_seconds, self.num_examples))
+
+    def project_wave(
+        self,
+        strain,
+        sample_rate_hertz = None,
+        right_ascension = None,
+        declination = None,
+        polarization = None,
+        gps_time_seconds = None
+    ):
+        """
+        Project each example's (2, Time) polarisations (or (Detectors, 2,
+        Time), a waveform per detector) onto its own detectors, as
+        Network.project_wave does onto one network: (Batch, Detectors, Time),
+        zero in the detectors absent from the example.
+        """
+        if sample_rate_hertz is None:
+            sample_rate_hertz = gf.Defaults.sample_rate_hertz
+        if any(angle is None for angle in (right_ascension, declination, polarization)):
+            raise ValueError("project_wave needs every sky angle, one per example.")
+        if ops.shape(strain)[0] != self.num_examples:
+            raise ValueError(
+                f"The strain has {ops.shape(strain)[0]} examples and the networks {self.num_examples}."
+            )
+        right_ascension, declination, polarization = self._per_example(
+            right_ascension=right_ascension, declination=declination, polarization=polarization)
+        projected = project_wave_per_example(
+            ops.cast(strain, "float32"), sample_rate_hertz,
+            *(getattr(self, name) for name in self.GEOMETRY),
+            right_ascension, declination, polarization,
+            Network.gmst_radians(gps_time_seconds, self.num_examples),
+        )
+        return projected * self.present[..., None]
+
+    def features(self) -> jnp.ndarray:
+        """
+        Each detector's geometry as a model reads it, (Batch, Detectors, 9)
+        float32: its Earth-fixed position in Earth radii
+        (``GEOMETRY_FEATURE_RADIUS_METERS``), then the six independent
+        components of its response tensor (x x^T - y y^T) / 2: xx, yy, zz,
+        xy, xz, yz.
+        """
+        position = self.location / np.float32(GEOMETRY_FEATURE_RADIUS_METERS)
+        response = jnp.stack([self.response[..., i, j] for i, j in _RESPONSE_COMPONENTS], axis=-1)
+        return jnp.concatenate([position, response], axis=-1).astype(jnp.float32)
+
+
+def check_detectors(detectors) -> List:
+    """
+    ``detectors`` as a list, if each is a bundled detector (gf.IFO) or a
+    DetectorSlot and no two share a name; else ValueError, by name. A
+    detector's name keys its noise streams, so two detectors of one name would
+    have identical noise.
+    """
+    detectors = list(detectors)
+    for detector in detectors:
+        if not isinstance(detector, (IFO, DetectorSlot)):
+            raise TypeError(f"A detector is a gf.IFO or a gf.DetectorSlot, not {detector!r}.")
+    names = [detector.name for detector in detectors]
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        raise ValueError(
+            f"The detectors {names} repeat {', '.join(repeated)}: a detector's noise is drawn from streams "
+            "named for it, so repeated detectors would have identical noise. For several independent "
+            "detectors with one noise curve, use gf.DetectorSlots, each with its own name."
+        )
+    return detectors
+
+
+@dataclass(frozen=True)
+class Detectors:
+    """
+    A dataset's detectors when each example has a network of its own: bundled
+    detectors (gf.IFO) at their sites, and DetectorSlots whose geometry is
+    drawn per example; and how many are present in each example.
+
+    ``num_present`` (a gf.Distribution of integers in [1, len(detectors)];
+    None: all of them) is drawn per example from the batch's
+    ``network/count`` stream, and the present detectors are a uniformly random
+    subset of that size, from ``network/subset``. An absent detector keeps its
+    noise but receives no signal, so it adds nothing to the network SNR a
+    signal is scaled to. Each detector is one channel of the noise, in order.
+
+    A dataset given Detectors (``ifos=``) projects every example onto its own
+    network (``sample``), and its waveform generators take the Detectors as
+    their network. Placement and buffers allow for the farthest any detector
+    can be: the WGS84 equatorial radius plus a slot's greatest height.
+    """
+    detectors : Tuple[Union[IFO, DetectorSlot], ...]
+    num_present : Optional["gf.Distribution"] = None
+
+    def __post_init__(self):
+        object.__setattr__(self, "detectors", tuple(check_detectors(self.detectors)))
+        if not self.detectors:
+            raise ValueError("Detectors needs at least one detector.")
+        if self.num_present is not None and not isinstance(self.num_present, gf.Distribution):
+            raise TypeError(
+                f"num_present is a gf.Distribution of the number of detectors present, not {self.num_present!r}."
+            )
+
+    @property
+    def num_detectors(self) -> int:
+        return len(self.detectors)
+
+    @property
+    def ifos(self) -> List[Union[IFO, DetectorSlot]]:
+        """The detectors, in channel order."""
+        return list(self.detectors)
+
+    @property
+    def slots(self) -> List[DetectorSlot]:
+        return [detector for detector in self.detectors if isinstance(detector, DetectorSlot)]
+
+    @property
+    def varies(self) -> bool:
+        """Whether examples differ in their networks: a slot's geometry or the detectors present."""
+        return bool(self.slots) or self.num_present is not None
+
+    @property
+    def _bundled_ifos(self) -> List[IFO]:
+        return [detector for detector in self.detectors if isinstance(detector, IFO)]
+
+    @cached_property
+    def _bundled(self) -> Optional["Network"]:
+        """The Network of the bundled detectors, in order; None without any."""
+        return Network(self._bundled_ifos) if self._bundled_ifos else None
+
+    def _bundled_column(self, ifo : IFO, num_examples : int) -> Dict[str, np.ndarray]:
+        """A bundled detector's geometry, its Network's, in each of ``num_examples`` examples."""
+        index = self._bundled_ifos.index(ifo)
+        column = {}
+        for name in ExampleNetworks.GEOMETRY:
+            value = np.asarray(getattr(self._bundled, name), dtype=np.float32)[index]
+            column[name] = np.broadcast_to(value, (num_examples,) + value.shape)
+        return column
+
+    def _geocentre_distances_meters(self) -> np.ndarray:
+        """Each detector's greatest distance from the geocentre, metres."""
+        bundled = iter(np.linalg.norm(np.asarray(self._bundled.location, dtype=np.float64), axis=-1)) \
+            if self._bundled is not None else iter(())
+        return np.array([
+            next(bundled) if isinstance(detector, IFO) else detector.max_geocentre_distance_meters()
+            for detector in self.detectors
+        ])
+
+    def max_geocentre_delay_seconds(self) -> float:
+        """The largest delay there can be between the geocentre and a detector, in seconds."""
+        return float(np.max(self._geocentre_distances_meters())) / 299792458.0
+
+    @property
+    def max_arrival_time_difference_seconds(self) -> float:
+        """
+        The largest light travel time there can be between two of the
+        detectors, in seconds: between bundled detectors their baseline, and
+        with a slot, the sum of the two greatest distances from the geocentre.
+        """
+        if not self.slots:
+            return float(self._bundled.max_arrival_time_difference_seconds)
+        distances = self._geocentre_distances_meters()
+        if len(distances) < 2:
+            return 0.0
+        bound = distances[:, None] + distances[None, :]
+        if self._bundled is not None:
+            fixed = [j for j, detector in enumerate(self.detectors) if isinstance(detector, IFO)]
+            bound[np.ix_(fixed, fixed)] = np.asarray(self._bundled.distances, dtype=np.float64)
+        # A detector's delay from itself is no baseline.
+        np.fill_diagonal(bound, 0.0)
+        return float(np.max(bound)) / C
+
+    def draw_present(self, num_examples : int, streams) -> np.ndarray:
+        """Which detectors each example has, (Batch, Detectors) float32, from ``network/count`` and ``network/subset``."""
+        if self.num_present is None:
+            return np.ones((num_examples, self.num_detectors), dtype=np.float32)
+        count = np.asarray(self.num_present.sample(num_examples, streams.stream("network/count")))
+        if count.shape != (num_examples,) or not np.all(count == np.round(count)) \
+                or np.any(count < 1) or np.any(count > self.num_detectors):
+            raise ValueError(
+                f"num_present drew {sorted(set(np.ravel(count).tolist()))}: each example's detector count "
+                f"is a whole number from 1 to the {self.num_detectors} detectors."
+            )
+        keys = streams.stream("network/subset").random((num_examples, self.num_detectors))
+        rank = np.argsort(np.argsort(keys, axis=1), axis=1)
+        return (rank < count[:, None]).astype(np.float32)
+
+    def sample(self, num_examples : int, streams) -> ExampleNetworks:
+        """
+        The network of each of ``num_examples`` examples, drawn from the batch's
+        ``streams`` (a gf.BatchStreams): a bundled detector's fixed geometry, a
+        slot's drawn (``DetectorSlot.draw``), and the detectors present.
+        """
+        columns = [
+            self._bundled_column(detector, num_examples) if isinstance(detector, IFO)
+            else detector_geometry(detector.draw(num_examples, streams))
+            for detector in self.detectors
+        ]
+        return ExampleNetworks.stack(columns, self.draw_present(num_examples, streams))
