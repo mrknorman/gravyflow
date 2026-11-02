@@ -124,6 +124,30 @@ def test_a_slots_geometry_outside_its_range_is_refused_by_name(parameter, value)
         gf.DetectorSlot("D0", noise_curve=gf.IFO.H1, **{parameter: value})
 
 
+NON_FINITE = {
+    "nan": float("nan"), "inf": float("inf"), "-inf": -float("inf"),
+    "uniform to nan": uniform(0.0, float("nan")), "uniform from -inf": uniform(-float("inf"), 0.0),
+    "normal mean nan": gf.Distribution(mean=float("nan"), std=0.1, type_=gf.DistributionType.NORMAL),
+    "normal std inf": gf.Distribution(mean=0.0, std=float("inf"), type_=gf.DistributionType.NORMAL),
+    "constant inf": gf.Distribution(value=float("inf"), type_=gf.DistributionType.CONSTANT),
+    "choice of nan": gf.Distribution(possible_values=[0.0, float("nan")], type_=gf.DistributionType.CHOICE),
+}
+
+
+@pytest.mark.parametrize("value", NON_FINITE.values(), ids=NON_FINITE.keys())
+@pytest.mark.parametrize("parameter", gf.src.dataset.conditioning.detector.SLOT_GEOMETRY)
+def test_a_slots_non_finite_geometry_is_refused_by_name(parameter, value):
+    """Every geometry parameter, longitude and the azimuths included: a NaN or infinite value or bound."""
+    with pytest.raises(ValueError, match=f"D0's {parameter} must be finite"):
+        gf.DetectorSlot("D0", noise_curve=gf.IFO.H1, **{parameter: value})
+
+
+def test_an_unbounded_normal_of_a_wrapping_angle_is_kept():
+    """Its bounds are absent, not infinite: every value it draws is finite, and longitude wraps."""
+    gf.DetectorSlot("D0", noise_curve=gf.IFO.H1,
+                    longitude_radians=gf.Distribution(mean=0.0, std=10.0, type_=gf.DistributionType.NORMAL))
+
+
 def test_a_slots_geometry_at_its_ranges_ends_is_kept():
     """Latitude and altitude to plus or minus pi / 2, an opening angle inside (0, pi), a height within 10 km."""
     slot = gf.DetectorSlot("D0", noise_curve=gf.IFO.H1, latitude_radians=np.pi / 2, opening_angle_radians=3.0,

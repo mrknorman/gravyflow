@@ -996,6 +996,10 @@ _SLOT_RANGES = {
     "y_altitude_radians": (-np.pi / 2.0, np.pi / 2.0, False),
 }
 
+#: The numbers a gf.Distribution may be given, each finite in a slot's geometry
+#: (an unbounded NORMAL has no bounds, which is not an infinite one).
+_DISTRIBUTION_NUMBERS = ("value", "min_", "max_", "mean", "std", "possible_values")
+
 
 @dataclass(frozen=True)
 class DetectorSlot:
@@ -1018,7 +1022,9 @@ class DetectorSlot:
     bundled detectors' arms do (pi / 2; pi / 3 for a triangle's detector); the
     arms are level. Arm lengths enter no projection.
 
-    Refused by name, here: a latitude or arm altitude outside [-pi / 2, pi / 2],
+    Refused by name, here: any parameter that is not finite (a NaN or
+    infinite value, or a distribution given one: a bound, a mean, a deviation
+    or a possible value), a latitude or arm altitude outside [-pi / 2, pi / 2],
     an opening angle outside (0, pi), a height more than
     ``MAX_SLOT_HEIGHT_METERS`` from the ellipsoid, and a distribution whose
     support (its bounds, values, or an unbounded NORMAL's) reaches outside
@@ -1061,6 +1067,17 @@ class DetectorSlot:
                 f"A detector slot's {parameter} is a float or a gf.Distribution"
                 f"{', or None for its default draw' if parameter in SLOT_GEOMETRY[:3] else ''}; got {value!r}."
             )
+        for parameter in SLOT_GEOMETRY:
+            value = getattr(self, parameter)
+            given = {} if value is None else {"value": value} if isinstance(value, float) else {
+                field: getattr(value, field) for field in _DISTRIBUTION_NUMBERS if getattr(value, field) is not None}
+            non_finite = [field for field, number in given.items()
+                          if not np.all(np.isfinite(np.asarray(number, dtype=np.float64)))]
+            if non_finite:
+                raise ValueError(
+                    f"{self.name}'s {parameter} must be finite, but {value!r} has a non-finite "
+                    f"{', '.join(non_finite)}. A slot's geometry is finite numbers, or a gf.Distribution of them."
+                )
         for parameter, (low, high, open_) in _SLOT_RANGES.items():
             value = getattr(self, parameter)
             if value is None:
