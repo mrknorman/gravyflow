@@ -138,6 +138,8 @@ the curve a bundled detector has in the noise profile. Slots whose geometry is d
 plain list of detectors is a fixed network, so a slot in one has all its geometry fixed (a custom detector).
 `gf.Detectors` also draws how many detectors each example has;
 an absent detector keeps its noise, receives no signal and adds nothing to the SNR a signal is scaled to.
+`DETECTOR_SNR` gives each detector's optimal SNR of each injection, whose root-sum-square over the detectors is
+the network SNR it was scaled to (0 in an absent detector).
 `DETECTOR_GEOMETRY` (each detector's Earth-fixed position in Earth radii and its response tensor's six components)
 and `DETECTOR_MASK` give each example's network, so a model can take them as inputs; a fixed network gives its own
 geometry and every detector. Detectors that repeat a name are refused: they would have identical noise.

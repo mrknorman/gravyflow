@@ -138,6 +138,14 @@ repository before it may need the changes below.
 
 ### Added
 
+- **Each detector's own SNR.** `ReturnVariables.DETECTOR_SNR` (B, G, I) is each detector's optimal SNR of each
+  generator's injection as it is injected (scaled and projected), by the measure SNR scaling uses (`gf.snr`, now
+  with `per_detector=True` for each detector's term, against the batch's spectrum over the onsource window): its
+  root-sum-square over the detectors is the network SNR, `ScalingTypes.SNR` (the target, for an injection scaled to
+  one), to float32 rounding. It is 0 in a detector absent from the example's network, and NaN where the generator
+  injected nothing. It is one of `gf.INJECTION_RECORDS`. `WHITENED_PEAK` measures one sample, the whitened
+  strain's largest, and lies below it for any signal longer than one sample.
+
 - **Networks drawn per example.** `gf.DetectorSlot` is a detector at no bundled site: its geometry is drawn per
   example from streams of its own (`network/{slot}/{parameter}`; by default its vertex uniform on the sphere, its x
   arm's azimuth uniform, an opening angle of pi / 2, level arms, every parameter a value or a `gf.Distribution`;

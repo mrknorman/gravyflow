@@ -169,3 +169,24 @@ def test_scale_to_snr_gives_the_target_when_measured_again(case):
     # Representation: float32 rounding of the SNR's sum of N squares, twice (scale, measure).
     np.testing.assert_allclose(measured, expected,
                                rtol=representation_tolerance(np.float32, 1.0, 2 * np.sqrt(injection.shape[-1])))
+
+
+def test_each_detectors_snr_is_a_term_of_the_network_snr():
+    """
+    ``per_detector=True`` gives each detector's SNR of a (B, I, T) injection,
+    (B, I): each the closed form, and their root-sum-square the network SNR.
+    """
+    rate, lower = 256.0, 10.0
+    injection = np.random.default_rng(3).standard_normal((4, 3, 1024)).astype(np.float32)
+    injection[1, 2] = 0.0  # a detector without the signal has SNR 0
+    spectrum = white_spectrum(rate, lower)
+    each = np.asarray(gf_snr.snr(injection, spectrum, rate, per_detector=True))
+    network = np.asarray(gf_snr.snr(injection, spectrum, rate))
+    assert each.shape == (4, 3) and each[1, 2] == 0.0
+    # Representation: float32 rounding of an FFT and a sum of N squares, relative.
+    tolerance = representation_tolerance(np.float32, 1.0, np.sqrt(injection.shape[-1]))
+    np.testing.assert_allclose(each, closed_form_snr(injection, rate, lower), rtol=tolerance)
+    np.testing.assert_allclose(np.sqrt(np.sum(np.asarray(each, np.float64) ** 2, axis=-1)), network, rtol=tolerance)
+    # Rows are already each their own SNR.
+    np.testing.assert_array_equal(gf_snr.snr(injection[:, 0], spectrum, rate, per_detector=True),
+                                  gf_snr.snr(injection[:, 0], spectrum, rate))

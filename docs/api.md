@@ -146,7 +146,7 @@ are never mixed. Each preset's files ship with the package, pinned by sha256; th
 - `ScalingOrdinality`: whether a scaling is measured before or after projection onto the detectors.
 - `calculate_hrss`: the root-sum-square strain of waveforms.
 - `calculate_hpeak`: the peak strain of waveforms.
-- `INJECTION_RECORDS`: the records of each injection a dataset returns when asked, for later analysis: `IN_BAND_DURATION_SECONDS` (a CBC's time from the band's lower frequency to its merger, by its waveform model, whatever the window; NaN for other sources) and `WHITENED_PEAK` / `NETWORK_WHITENED_PEAK` (the peak of the injection's whitened strain in each detector over the whitened noise's deviation, `gf.whitened_noise_std`, and their root-sum-square). With the existing loudness labels (`ScalingTypes.SNR`, the optimal network SNR; `ScalingTypes.HRSS`, the source's root-sum-square strain) and `ReturnVariables.BNS_RANGE_MPC` (each example's BNS range per detector), they are the records a validation run keeps for each injection. The merger's GPS time at each detector is `START_GPS_TIME + CENTRAL_TIME x onsource_duration_seconds` for real noise; simulated noise has no GPS time (NaN), and its projection uses the generator's `reference_gps_time_seconds`.
+- `INJECTION_RECORDS`: the records of each injection a dataset returns when asked, for later analysis: `IN_BAND_DURATION_SECONDS` (a CBC's time from the band's lower frequency to its merger, by its waveform model, whatever the window; NaN for other sources) and `WHITENED_PEAK` / `NETWORK_WHITENED_PEAK` (the peak of the injection's whitened strain in each detector over the whitened noise's deviation, `gf.whitened_noise_std`, and their root-sum-square), and `DETECTOR_SNR` (each detector's optimal SNR of the injection as injected, by the measure SNR scaling uses, so that its root-sum-square over the detectors is the network SNR, `ScalingTypes.SNR`; 0 in a detector absent from the example's network; a whitened peak is the largest single sample, below this SNR for any signal longer than one). With the existing loudness labels (`ScalingTypes.SNR`, the optimal network SNR; `ScalingTypes.HRSS`, the source's root-sum-square strain) and `ReturnVariables.BNS_RANGE_MPC` (each example's BNS range per detector), they are the records a validation run keeps for each injection. The merger's GPS time at each detector is `START_GPS_TIME + CENTRAL_TIME x onsource_duration_seconds` for real noise; simulated noise has no GPS time (NaN), and its projection uses the generator's `reference_gps_time_seconds`.
 - `WaveShape`: the simple waveform shapes.
 - `PeriodicWaveGenerator`: sines, squares, sawtooths and triangles.
 - `SineGaussianGenerator`: sine-Gaussians.
@@ -159,7 +159,7 @@ are never mixed. Each preset's files ship with the package, pinned by sha256; th
 - `psd`: the Welch power spectral density of strain, as a `PowerSpectrum` (the one public PSD).
 - `PowerSpectrum`: a PSD kept scale-free: the normalised spectrum and its amplitude scale.
 - `SpectralConfig`: the settings of a PSD estimate and of whitening.
-- `snr`: the optimal SNR of injections in noise.
+- `snr`: the optimal SNR of injections in noise: the network SNR of each example, or with `per_detector=True` each detector's, whose root-sum-square it is.
 - `scale_to_snr`: scale injections to a target SNR.
 - `whiten`: whiten strain by its offsource PSD.
 - `whitened_noise_std`: the standard deviation of stationary Gaussian noise whitened over a band.

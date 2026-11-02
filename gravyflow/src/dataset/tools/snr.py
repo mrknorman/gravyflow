@@ -103,13 +103,16 @@ def snr(
         lower_frequency_cutoff: Optional[float] = None,
         upper_frequency_cutoff: Optional[float] = None,
         psd_method: Optional[str] = None,
+        *,
+        per_detector: bool = False,
     ):
     """
     Optimal SNR of `injection` in the noise of `background`.
 
-    Shapes: (B, I, T) gives the network SNR per example, (B,); (B, T) gives one
-    SNR per row, (B,); (T,) gives a scalar. Leading axes beyond three are kept:
-    (G, B, I, T) gives (G, B).
+    Shapes: (B, I, T) gives the network SNR per example, (B,), or with
+    `per_detector` each detector's, (B, I), the terms whose root-sum-square is
+    the network SNR; (B, T) gives one SNR per row, (B,); (T,) gives a scalar.
+    Leading axes beyond three are kept: (G, B, I, T) gives (G, B), or (G, B, I).
 
     `background` is a PowerSpectrum (its band and estimator apply; explicit
     arguments must agree with it) or a timeseries (..., T_off) whose PSD is
@@ -127,7 +130,7 @@ def snr(
         injection = injection[None, :]
     num_samples = int(injection.shape[-1])
     band = spectrum.config.band_indices(num_samples, sample_rate_hertz)
-    result = _snr_from_spectrum(injection, spectrum, band, rank >= 3)
+    result = _snr_from_spectrum(injection, spectrum, band, rank >= 3 and not per_detector)
     return result[0] if rank == 1 else result
 
 

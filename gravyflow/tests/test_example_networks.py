@@ -27,6 +27,7 @@ from gravyflow.src.dataset.conditioning.detector import (
 )
 from gravyflow.src.dataset.noise import noise as gf_noise
 from gravyflow.src.rng import check_consumer
+from gravyflow.tests._helpers import representation_tolerance
 from gravyflow.tests.test_colored_noise_amplitude import _assert_median_matches_the_profile
 
 RV = gf.ReturnVariables
@@ -459,6 +460,38 @@ def test_absent_detectors_carry_no_signal_and_no_snr():
         present = mask[b] > 0
         snr = float(gf.snr(injections[b:b + 1, present], offsource[b:b + 1, present], SAMPLE_RATE)[0])
         np.testing.assert_allclose(snr, float(np.asarray(y["SNR"])[b, 0]), rtol=1e-4)
+
+
+#: Representation: float32 rounding of the SNR's sum of N squares, twice (scale, measure); N = one onsource window.
+SNR_TOLERANCE = representation_tolerance(np.float32, 1.0, 2 * np.sqrt(SAMPLE_RATE * 1.0))
+
+
+@pytest.mark.parametrize("ifos", [
+    [gf.IFO.H1, gf.IFO.L1],
+    gf.Detectors([gf.IFO.H1, gf.IFO.L1, gf.IFO.V1]),
+    gf.Detectors([gf.IFO.H1, *slots(2)], num_present=count_between(1, 2)),
+], ids=["fixed", "Detectors", "Detectors with absent detectors"])
+def test_each_detectors_snr_sums_to_the_network_snr_targeted(ifos):
+    """
+    DETECTOR_SNR, each detector's optimal SNR of the scaled injection by the
+    scaling's own measure: over the detectors its root-sum-square is the SNR
+    target; an absent detector's is 0; NaN where nothing was injected.
+    """
+    generators = [wnb(injection_chance=0.6), wnb()]
+    ds = dataset(ifos, generators=generators, noise_type=gf.NoiseType.COLORED,
+                 outputs=(RV.DETECTOR_SNR, gf.ScalingTypes.SNR, RV.INJECTION_MASKS, RV.DETECTOR_MASK))
+    _, y = ds[0]
+    each, target = np.asarray(y["DETECTOR_SNR"], np.float64), np.asarray(y["SNR"], np.float64)
+    injected = np.asarray(y["INJECTION_MASKS"]) > 0
+    mask = np.asarray(y["DETECTOR_MASK"])
+    assert each.shape == (BATCH, 2, mask.shape[1])
+    assert (~injected).any() and injected.all(axis=0)[1]
+    assert np.isnan(each[~injected]).all() and np.isfinite(each[injected]).all()
+    absent = np.broadcast_to(mask[:, None] == 0, each.shape) & injected[..., None]
+    assert absent.any() == (getattr(ifos, "num_present", None) is not None)
+    np.testing.assert_array_equal(each[absent], 0.0)
+    assert np.all(each[injected[..., None] & (mask[:, None] > 0)] > 0)
+    np.testing.assert_allclose(np.sqrt(np.sum(each[injected] ** 2, axis=-1)), target[injected], rtol=SNR_TOLERANCE)
 
 
 def test_incoherent_components_reach_only_present_detectors():

@@ -334,6 +334,17 @@ class ReturnVariables(Enum):
     DETECTOR_GEOMETRY = ReturnVariable(25, (BATCH, IFO, 9))
     DETECTOR_MASK = ReturnVariable(26, (BATCH, IFO))
 
+    # Each detector's optimal SNR of the injection as it is injected (scaled
+    # and projected), by the measure SNR scaling uses (gf.snr with
+    # per_detector=True, the batch's spectrum, the onsource window): over the
+    # detectors its root-sum-square is the network SNR, ScalingTypes.SNR (the
+    # target, where the injection was scaled to one). 0 in a detector absent
+    # from the example's network, which receives no signal. WHITENED_PEAK is a
+    # different measure, of one sample: the whitened strain's largest value over
+    # the noise's deviation, at most about this SNR (all of the signal's power
+    # in one sample), and below it for any signal of more than one sample.
+    DETECTOR_SNR = ReturnVariable(27, (BATCH, GENERATOR, IFO))
+
     def __lt__(self, other):
         return self.value.index < other.value.index
 
@@ -343,6 +354,7 @@ INJECTION_RECORDS = (
     ReturnVariables.IN_BAND_DURATION_SECONDS,
     ReturnVariables.WHITENED_PEAK,
     ReturnVariables.NETWORK_WHITENED_PEAK,
+    ReturnVariables.DETECTOR_SNR,
 )
 
 @dataclass
@@ -2282,6 +2294,12 @@ class InjectionGenerator:
                 result[ReturnVariables.WHITENED_PEAK] = peak
             if ReturnVariables.NETWORK_WHITENED_PEAK in records:
                 result[ReturnVariables.NETWORK_WHITENED_PEAK] = ops.sqrt(ops.sum(peak * peak, axis=-1))
+
+        if ReturnVariables.DETECTOR_SNR in records:
+            # As the SNR label and scale_to_snr measure it: the onsource window.
+            measured = projected if onsource_duration_seconds is None else gf.crop_samples(
+                projected, onsource_duration_seconds, sample_rate)
+            result[ReturnVariables.DETECTOR_SNR] = gf.snr(measured, spectrum, sample_rate, per_detector=True)
         return result
 
     def _generator_parameter(self, injection_parameters, key, index):
