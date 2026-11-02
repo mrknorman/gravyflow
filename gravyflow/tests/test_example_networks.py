@@ -152,16 +152,16 @@ def test_vectorised_geodetic_places_the_bundled_detectors_at_lals_vertices():
 
 
 def test_a_slots_geometry_is_a_networks():
-    """Arms and responses from a slot's drawn parameters are a Network's of them, bit for bit."""
+    """The geometry of a slot's drawn parameters is a Network's of them, bit for bit, in float64."""
     slot = gf.DetectorSlot("D0", noise_curve=gf.IFO.H1, opening_angle_radians=np.pi / 3.0)
     parameters = slot.draw(16, gf.SeedTree(5).batch("train", 0, 0))
     geometry = detector_geometry(parameters)
     network = gf.Network({**{key: np.asarray(value) for key, value in parameters.items()}, "num_detectors": 16})
-    for name in ("x_vector", "y_vector", "x_response", "y_response", "response"):
+    for name in gf.ExampleNetworks.GEOMETRY:
+        assert geometry[name].dtype == np.float64, name
         np.testing.assert_array_equal(geometry[name], np.asarray(getattr(network, name)), err_msg=name)
-    # The location is the float64 conversion's, rounded once.
     expected = geodetic_to_earth_fixed(parameters["longitude_radians"], parameters["latitude_radians"],
-                                       parameters["height_meters"]).astype(np.float32)
+                                       parameters["height_meters"])
     np.testing.assert_array_equal(geometry["location"], expected)
     opening = np.arccos(np.clip(np.sum(geometry["x_vector"] * geometry["y_vector"], axis=-1), -1.0, 1.0))
     np.testing.assert_allclose(opening, np.pi / 3.0, atol=1e-6)
@@ -220,9 +220,9 @@ def test_per_example_projection_equals_a_network_per_example():
             np.concatenate([np.asarray(network.get_time_delay(jnp.asarray(ra[b:b + 1]), jnp.asarray(dec[b:b + 1])))
                             for b, network in enumerate(references)]),
             rtol=0, atol=1e-9)
-    # Drawn geometry is each Network's but for the vertex, which a Network places through astropy in float32.
-    np.testing.assert_array_equal(networks.response, own.response)
-    np.testing.assert_allclose(networks.location, own.location, rtol=0, atol=4.0)
+    # Drawn geometry is each Network's, which the projection reads in float32.
+    for name in gf.ExampleNetworks.GEOMETRY:
+        np.testing.assert_array_equal(getattr(networks, name), getattr(own, name).astype(np.float32), err_msg=name)
 
 
 def test_each_example_has_its_own_reproducible_geometry():

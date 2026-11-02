@@ -12,7 +12,6 @@ from keras import ops
 import jax.numpy as jnp
 import jax
 import numpy as np
-from astropy import coordinates, units
 from gravyflow.src.resources import RESOURCES
 from gravyflow.src.rng.consumers import check_name
 from gravyflow.src.utils.tensor import rfftfreq
@@ -92,7 +91,9 @@ def get_time_delay_(
     """
     hour_angle = _greenwich_hour_angle(right_ascension, gmst_radians)
     declination = ops.convert_to_tensor(declination)
-    location = ops.convert_to_tensor(location)
+    # The projection computes in float32 (JAX's 64-bit mode is on only for
+    # waveform generation and templates); a Network holds its geometry in float64.
+    location = ops.convert_to_tensor(location, dtype="float32")
 
     cos_declination = ops.cos(declination)
     sin_declination = ops.sin(declination)
@@ -147,7 +148,7 @@ def get_antenna_pattern_(
     y_length_meters = ops.expand_dims(y_length_meters, 0)  
     x_response = ops.expand_dims(x_response, 0)  
     y_response = ops.expand_dims(y_response, 0)  
-    response = ops.expand_dims(response, 0)
+    response = ops.expand_dims(ops.convert_to_tensor(response, dtype="float32"), 0)
 
     cos_ra = ops.cos(right_ascension)
     sin_ra = ops.sin(right_ascension)
@@ -630,18 +631,15 @@ class Network:
                 
             for key, value in parameters.items():
                 if isinstance(value, (float, int)):
-                    arguments[key] = ops.convert_to_tensor([value], dtype="float32")
-                elif isinstance(value, (list, np.ndarray)):  # pragma: no cover
-                    arguments[key] = ops.convert_to_tensor(value, dtype="float32")
-                elif ops.is_tensor(value):  # pragma: no cover
-                     arguments[key] = ops.cast(value, "float32")
+                    arguments[key] = np.array([value], dtype=np.float64)
+                elif isinstance(value, (list, np.ndarray)) or ops.is_tensor(value):  # pragma: no cover
+                    arguments[key] = np.asarray(value, dtype=np.float64).reshape(-1)
                 elif isinstance(value, gf.Distribution):
                     if num_detectors is None:
                         raise ValueError("Num detectors not specified")
                     else:
-                        arguments[key] = ops.convert_to_tensor(
-                            value.sample(num_detectors, geometry_rng()),
-                            dtype="float32"
+                        arguments[key] = np.asarray(
+                            value.sample(num_detectors, geometry_rng()), dtype=np.float64
                         )
                         
         elif isinstance(parameters, list):
@@ -667,11 +665,7 @@ class Network:
                         "When initializing a network from a list, all "
                         "elements must be IFO Enums.")
 
-                tensor = ops.convert_to_tensor(
-                    attribute_list, 
-                    dtype="float32"
-                )
-                arguments[attribute] = tensor
+                arguments[attribute] = np.asarray(attribute_list, dtype=np.float64)
                 
         else:  # pragma: no cover
              raise ValueError(
@@ -699,70 +693,45 @@ class Network:
 
     def init_parameters(
         self,
-        longitude_radians = None,  # Batched tensor
-        latitude_radians = None,   # Batched tensor
-        y_angle_radians = None,  # Batched tensor
-        x_angle_radians = None,  # Batched tensor or None
-        height_meters = None,  # Batched tensor
-        x_length_meters = None,  # Batched tensor
-        y_length_meters = None,  # Batched tensor
-        x_altitude_radians = None,  # Batched tensor or None (level arms)
-        y_altitude_radians = None   # Batched tensor or None (level arms)
+        longitude_radians = None,
+        latitude_radians = None,
+        y_angle_radians = None,
+        x_angle_radians = None,  # None: the y arm's azimuth plus pi / 2
+        height_meters = None,
+        x_length_meters = None,
+        y_length_meters = None,
+        x_altitude_radians = None,  # None: level arms
+        y_altitude_radians = None
     ):
-        
-        PI = np.pi
-
+        """
+        The network's geometry from its detectors' sites, each parameter one
+        float64 value per detector: ``detector_geometry``'s, held in float64. An
+        Earth-fixed coordinate in float32 is quantised to about half a metre;
+        the projection casts what it reads to float32.
+        """
         if x_angle_radians is None:
-            x_angle_radians = \
-                y_angle_radians + ops.convert_to_tensor(PI / 2.0, dtype="float32")
+            x_angle_radians = y_angle_radians + np.pi / 2.0
         if x_altitude_radians is None:
-            x_altitude_radians = ops.zeros_like(y_angle_radians)
+            x_altitude_radians = np.zeros_like(y_angle_radians)
         if y_altitude_radians is None:
-            y_altitude_radians = ops.zeros_like(y_angle_radians)
+            y_altitude_radians = np.zeros_like(y_angle_radians)
 
-        def f64(value):
-            return np.asarray(value, dtype=np.float64).reshape(-1)
+        sites = {
+            "longitude_radians": longitude_radians, "latitude_radians": latitude_radians,
+            "x_angle_radians": x_angle_radians, "y_angle_radians": y_angle_radians,
+            "x_altitude_radians": x_altitude_radians, "y_altitude_radians": y_altitude_radians,
+            "height_meters": height_meters,
+            "x_length_meters": x_length_meters, "y_length_meters": y_length_meters,
+        }
+        sites = {name: np.asarray(value, dtype=np.float64).reshape(-1) for name, value in sites.items()}
+        for name, value in detector_geometry(sites).items():
+            setattr(self, name, value)
+        for name in ("y_angle_radians", "x_angle_radians", "x_altitude_radians",
+                     "y_altitude_radians", "height_meters"):
+            setattr(self, name, sites[name])
 
-        x_arm, y_arm, x_arm_response, y_arm_response, response = arm_tensors(
-            f64(longitude_radians), f64(latitude_radians),
-            f64(x_angle_radians), f64(y_angle_radians),
-            f64(x_altitude_radians), f64(y_altitude_radians),
-        )
-        full_response = ops.convert_to_tensor(response, dtype="float32")
-
-        # Handling the coordinates.EarthLocation method
-        # This part requires numpy/cpu execution as astropy is not differentiable/JAX-native
-        # We can use jax.pure_callback if needed, or just run it eagerly since init is usually once.
-        
-        # Convert tensors to numpy for astropy
-        long_np = np.array(longitude_radians)
-        lat_np = np.array(latitude_radians)
-        h_np = np.array(height_meters)
-        
-        locations = []
-        for long, lat, h in zip(long_np, lat_np, h_np):
-            loc = coordinates.EarthLocation.from_geodetic(
-                long * units.rad, lat * units.rad, h*units.meter
-            )
-            locations.append([loc.x.value, loc.y.value, loc.z.value])
-        loc = ops.convert_to_tensor(locations, dtype="float32")
-
-        self.location = loc
-        self.response = full_response
-        self.x_response = ops.convert_to_tensor(x_arm_response, dtype="float32")
-        self.y_response = ops.convert_to_tensor(y_arm_response, dtype="float32")
-        self.x_vector = ops.convert_to_tensor(x_arm, dtype="float32")
-        self.y_vector = ops.convert_to_tensor(y_arm, dtype="float32")
-        self.y_angle_radians = y_angle_radians
-        self.x_angle_radians = x_angle_radians
-        self.x_altitude_radians = x_altitude_radians
-        self.y_altitude_radians = y_altitude_radians
-        self.height_meters = height_meters
-        self.y_length_meters = y_length_meters
-        self.x_length_meters = x_length_meters
-        
         self.calculate_max_arrival_time_difference()
-    
+
     @staticmethod
     def gmst_radians(gps_time_seconds = None, num_sources : int = None):
         """
@@ -978,25 +947,9 @@ class Network:
         return float(np.max(np.linalg.norm(locations, axis=-1))) / 299792458.0
 
     def calculate_max_arrival_time_difference(self):
-        """
-        Compute pairwise distances between each points.
-        """
-        # Expand dimensions to compute pairwise distances
-        p1 = ops.expand_dims(self.location, 1)  # Shape: [N, 1, 3]
-        p2 = ops.expand_dims(self.location, 0)  # Shape: [1, N, 3]
-
-        # Compute pairwise differences
-        diff = p1 - p2  # Shape: [N, N, 3]
-
-        # Compute pairwise Euclidean distances
-        # ops.norm(diff, axis=2)
-        # Keras 3 ops.norm might not exist or be different.
-        # ops.sqrt(ops.sum(ops.square(diff), axis=2))
-        self.distances = ops.sqrt(ops.sum(ops.square(diff), axis=2))
-        
-        max_distance = ops.max(self.distances)
-        
-        self.max_arrival_time_difference_seconds = max_distance/C
+        """The baselines between the detectors (metres, float64) and the longest one's light travel time."""
+        self.distances = np.linalg.norm(self.location[:, None] - self.location[None], axis=-1)
+        self.max_arrival_time_difference_seconds = float(np.max(self.distances)) / C
 
 
 def noise_curve_of(detector: Union[IFO, "DetectorSlot"]) -> IFO:
@@ -1127,11 +1080,12 @@ class DetectorSlot:
 
 def detector_geometry(parameters : Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
     """
-    The geometry a projection reads, float32, from a detector's geometry
+    The geometry a projection reads, float64, from a detector's geometry
     parameters (arrays of one shape, as a Network's dict names them, angles in
     radians): its Earth-fixed ``location`` (m), arm unit vectors, arm lengths
-    and response tensors, as a Network computes them, with the vertex placed
-    by the vectorised WGS84 conversion (``geodetic_to_earth_fixed``).
+    and response tensors, with the vertex placed by the vectorised WGS84
+    conversion (``geodetic_to_earth_fixed``). A Network holds it as it is; the
+    projection reads it in float32 (``ExampleNetworks``).
     """
     def f64(name):
         return np.asarray(parameters[name], dtype=np.float64)
@@ -1148,7 +1102,7 @@ def detector_geometry(parameters : Dict[str, np.ndarray]) -> Dict[str, np.ndarra
         "x_response": x_response, "y_response": y_response, "response": response,
         "location": location,
     }
-    return {name: value.astype(np.float32) for name, value in geometry.items()}
+    return geometry
 
 
 #: The Earth radius the geometry features measure positions in: WGS84's equatorial radius.

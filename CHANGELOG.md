@@ -149,7 +149,7 @@ repository before it may need the changes below.
   equatorial radius plus a slot's greatest height). `ReturnVariables.DETECTOR_GEOMETRY` (B, I, 9: each detector's
   Earth-fixed position in Earth radii and its response tensor's six components) and `DETECTOR_MASK` (B, I) give each
   example's network as model inputs; a fixed network gives its own geometry and every detector, in raw windows too
-  (`model_inputs`), so the validator validates such a model. Fixed networks project and draw exactly as before.
+  (`model_inputs`), so the validator validates such a model. Fixed networks draw exactly as before.
   `geodetic_to_earth_fixed` is WGS84's closed form, vectorised (astropy's to under a millimetre).
 
 - **Wrapping time slides and the per-detector path.** `WrappedSlides` (`gravyflow.src.validate`) lays the network's
@@ -407,6 +407,20 @@ repository before it may need the changes below.
   format version is not bumped again, and a record written before it has no 3D tab.
 
 ### Fixed
+
+- **A Network's geometry is computed and held in float64.** `gf.Network` rounded its detectors' sites to float32
+  before placing their vertices (through astropy, one detector at a time) and held its geometry in float32, so the
+  bundled detectors' vertices lay 0.1 to 0.43 m from lal's, and a Network built from geometry up to 2.5 m from its
+  own site. It now builds its arms, responses and vertices with `detector_geometry` (the vertex by
+  `geodetic_to_earth_fixed`) from float64 sites, and holds them and its baselines in float64: lal's vertices to
+  0.1 mm. The projection still computes in float32 (JAX's 64-bit mode is on only for waveform generation and
+  templates), casting the geometry it reads, so its delays stay within float32's rounding of the hour angle (lal's to
+  about 6 ns). Every batch projected onto a fixed network changes slightly: its delays by up to 2 ns (one float32
+  step), its antenna patterns by about 1e-7 and its projected strain by a few parts in a million; so do the bundled
+  detectors' geometry in per-example networks (`gf.Detectors`); a slot's drawn geometry is unchanged.
+  `detector_geometry` returns float64. A Network's specification holds the float64 geometry, so the fingerprint of
+  every dataset projected onto one changes, and a set materialised before is refused by name
+  (`FingerprintMismatch`), never served.
 
 - **Detectors that repeat a name are refused.** A detector's noise streams are named for it, so a dataset or noise
   batcher given one detector twice (H1 and H1) served identical noise in both channels, silently; it is refused by

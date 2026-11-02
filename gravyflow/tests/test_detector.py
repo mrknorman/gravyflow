@@ -2,10 +2,11 @@
 Detector geometry and projection: the Network against lal and pycbc.
 
 Antenna patterns and the response tensor of the three cached detectors are
-checked against lal in test_waveform_physics.py; here: the rotation helpers,
-the network's locations and baselines, a network built from a geometry dict,
-time delays, projection of polarisations onto one and three detectors, and the
-Network's construction and input checks.
+checked against lal in test_waveform_physics.py, and their vertices,
+baselines, delays and patterns against lal's recorded values in
+test_detector_reference.py; here: a network built from a geometry dict,
+projection of polarisations onto one and three detectors, and the Network's
+construction and input checks.
 
 lal is a required input of these tests: if it cannot be imported, they fail.
 """
@@ -53,29 +54,6 @@ def isotropic_sky(rng, count):
     return right_ascension, declination, polarization
 
 
-@pytest.fixture
-def network() -> gf.Network:
-    return gf.Network(list(IFOS))
-
-
-def test_network_locations_and_baselines_match_lal(network):
-    assert network.num_detectors == 3
-    location = np.asarray(network.location, np.float64)
-    # Representation: the geodetic angles and each coordinate are rounded to
-    # float32, about one half-ulp each at the Earth's radius.
-    tolerance = representation_tolerance(np.float32, np.max(np.abs(LAL_LOCATIONS)), c=2)
-    np.testing.assert_allclose(location, LAL_LOCATIONS, rtol=0, atol=tolerance)
-
-    # The longest baseline carries both ends' errors and its float32 norm's
-    # rounding, a baseline being shorter than two radii.
-    baselines = np.linalg.norm(LAL_LOCATIONS[:, None] - LAL_LOCATIONS[None], axis=-1)
-    np.testing.assert_allclose(
-        float(network.max_arrival_time_difference_seconds),
-        np.max(baselines) / lal.C_SI,
-        rtol=0, atol=3.0 * tolerance / lal.C_SI,
-    )
-
-
 def test_network_from_geometry_matches_pycbc():
     longitude, latitude = 0.5, 0.3
     network = gf.Network({
@@ -90,32 +68,12 @@ def test_network_from_geometry_matches_pycbc():
     add_detector_on_earth("gravyflow-test", longitude, latitude)
     reference = _ground_detectors["gravyflow-test"]
 
-    # Representation: the x arm's angle (y + fl(pi/2)) and each component are
-    # rounded to float32, unit-scale values.
-    tolerance = representation_tolerance(np.float32, 1.0, c=2)
+    # Representation: both build the arms in float64 from the same site, unit-scale values.
+    tolerance = representation_tolerance(np.float64, 1.0, c=2)
     for name, mine in (("xvec", network.x_vector), ("yvec", network.y_vector), ("response", network.response)):
         np.testing.assert_allclose(
             np.asarray(mine)[0], reference[name], rtol=0, atol=tolerance, err_msg=name
         )
-
-
-def test_time_delay_matches_lal(network):
-    right_ascension, declination, _ = isotropic_sky(np.random.default_rng(11), 100)
-    gps = 1126259462.4
-    delay = np.asarray(network.get_time_delay(
-        ops.convert_to_tensor(right_ascension), ops.convert_to_tensor(declination), gps_time_seconds=gps
-    ))
-    assert delay.shape == (100, 3)
-
-    # The arrival time at the detector minus at the geocentre, negative for a
-    # detector displaced towards the source.
-    for index, name in enumerate(LAL_DETECTORS):
-        location = lal.CachedDetectors[name].location
-        expected = [
-            lal.TimeDelayFromEarthCenter(location, float(ra), float(dec), gps)
-            for ra, dec in zip(right_ascension, declination)
-        ]
-        np.testing.assert_allclose(delay[:, index], expected, rtol=0, atol=DELAY_TOLERANCE_SECONDS)
 
 
 def _polarisations(sample_rate_hertz, num_samples):
