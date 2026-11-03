@@ -443,6 +443,14 @@ class WaveformGenerator:
     # generator, so one that names none cannot be mismatched.
     shape_attributes : ClassVar[Tuple[str, ...]] = ()
 
+    # The draws that move a waveform's extent (get_signal_extent_seconds), and
+    # any drawn again with one: a gf.MismatchedWaveforms places its example
+    # once for every detector, so it cannot differ in one (a detector's shorter
+    # burst would never come as near the window's edge as a real burst of its
+    # length does). Named by each generator whose draws set its extent; the
+    # base's extent is its longest signal's, which no draw moves.
+    extent_attributes : ClassVar[Tuple[str, ...]] = ()
+
     # Whether a waveform reversed in time is one this generator never makes,
     # whatever its parameters (gf.TimeReversed accepts only such a generator):
     # declared by each generator, so one that declares nothing cannot be
@@ -963,6 +971,12 @@ class WNBGenerator(WaveformGenerator):
     # receives in a combination of its own.
     shape_attributes : ClassVar[Tuple[str, ...]] = (
         "duration_seconds", "min_frequency_hertz", "max_frequency_hertz", "noise")
+
+    # Its extent is its duration's, and its band edges are drawn again with
+    # its duration wherever duration x bandwidth falls below the floor, so a
+    # burst's own band edges give it a duration of its own.
+    extent_attributes : ClassVar[Tuple[str, ...]] = (
+        "duration_seconds", "min_frequency_hertz", "max_frequency_hertz")
 
     distributed_attributes : Tuple[str] = (
         "duration_seconds",

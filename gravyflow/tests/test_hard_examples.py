@@ -324,14 +324,80 @@ def test_mismatched_waveforms_differ_in_the_named_draws_alone():
     assert np.all(np.isfinite(np.asarray(parameters[gf.WaveformParameters.DURATION_SECONDS])))
     support = np.abs(waveforms).max(axis=(0, 2)) > 0
     assert np.all(support == support[0])
+    half = np.asarray(parameters[gf.WaveformParameters.DURATION_SECONDS], np.float64) / 2.0
+    np.testing.assert_array_equal(np.asarray(parameters[SIGNAL_EXTENT]), np.stack([half, half], axis=-1))
 
-    durations = gf.HardExampleGenerator(
-        wnb(network=network, duration_seconds=uniform(0.05, 0.2)),
-        gf.MismatchedWaveforms(("duration_seconds",)), name="odd")
-    _, parameters = durations.generate(BATCH, SAMPLE_RATE, 2.0, streams)
-    assert np.all(np.isnan(np.asarray(parameters[gf.WaveformParameters.DURATION_SECONDS])))
-    extent = np.asarray(parameters[SIGNAL_EXTENT])
-    assert extent.shape == (BATCH, 2) and np.all(extent <= 0.1 + 1e-9)
+
+def test_a_mismatch_is_refused_where_it_moves_its_signals_extent():
+    """
+    A mismatched example is placed once for all its detectors, so a draw that moves its signal's extent (a burst's
+    length) would place a detector's shorter burst as the longest is placed: never as near the window's edge as a
+    real burst of its length. A mismatch in such a draw is refused by name when it is built (a draw of one value
+    moves nothing); one in the shape draws that leave the extent alone is taken.
+    """
+    for generator, differ in (
+            (wnb(duration_seconds=uniform(0.05, 0.2)), ("duration_seconds", "noise")),
+            (wnb(min_frequency_hertz=uniform(40.0, 60.0)), ("min_frequency_hertz", "noise")),
+            (wnb(max_frequency_hertz=uniform(150.0, 200.0)), ("max_frequency_hertz",)),
+            (gf.SineGaussianGenerator(frequency_hertz=uniform(80.0, 120.0)), ("frequency_hertz",)),
+            (gf.SineGaussianGenerator(quality_factor=uniform(5.0, 10.0)), ("quality_factor",)),
+            (gf.ChirpletGenerator(duration_seconds=uniform(0.2, 0.5)), ("duration_seconds",)),
+            (gf.RingdownGenerator(damping_time_seconds=uniform(0.01, 0.05)), ("damping_time_seconds",)),
+            (gf.PeriodicWaveGenerator(duration_seconds=uniform(0.2, 0.5)), ("frequency_hertz", "duration_seconds"))):
+        with pytest.raises(ValueError, match="moves its signal's extent"):
+            gf.HardExampleGenerator(generator, gf.MismatchedWaveforms(differ))
+    for generator, differ in (
+            (wnb(duration_seconds=uniform(0.05, 0.2)), ("noise",)),
+            (wnb(), ("duration_seconds", "noise")),
+            (gf.ChirpletGenerator(start_frequency_hertz=uniform(40.0, 60.0), duration_seconds=uniform(0.2, 0.5)),
+             ("start_frequency_hertz",)),
+            (gf.RingdownGenerator(frequency_hertz=uniform(100.0, 200.0), damping_time_seconds=uniform(0.01, 0.05)),
+             ("frequency_hertz",)),
+            (gf.PeriodicWaveGenerator(frequency_hertz=uniform(80.0, 120.0)), ("frequency_hertz",)),
+            (gf.CBCGenerator(mass_1_msun=uniform(15.0, 80.0)), ("mass_1_msun",))):
+        gf.HardExampleGenerator(generator, gf.MismatchedWaveforms(differ))
+    assert gf.WaveformGenerator.extent_attributes == ()
+
+
+#: Each generator with every draw that changes its shape drawn from a range; a white-noise burst's band edges overlap,
+#: so its floor on duration x bandwidth draws some bursts again.
+EXTENTS = {
+    gf.SineGaussianGenerator: dict(frequency_hertz=uniform(80.0, 120.0), quality_factor=uniform(5.0, 10.0)),
+    gf.ChirpletGenerator: dict(start_frequency_hertz=uniform(40.0, 60.0), end_frequency_hertz=uniform(100.0, 150.0),
+                               duration_seconds=uniform(0.2, 0.5)),
+    gf.RingdownGenerator: dict(frequency_hertz=uniform(100.0, 200.0), damping_time_seconds=uniform(0.01, 0.05)),
+    gf.PeriodicWaveGenerator: dict(frequency_hertz=uniform(80.0, 120.0), duration_seconds=uniform(0.2, 0.5)),
+    gf.WNBGenerator: dict(duration_seconds=uniform(0.02, 0.3), min_frequency_hertz=uniform(40.0, 120.0),
+                          max_frequency_hertz=uniform(100.0, 200.0)),
+    gf.CBCGenerator: dict(mass_1_msun=uniform(15.0, 80.0), mass_2_msun=uniform(15.0, 80.0),
+                          spin_1_in=(constant(0.0), constant(0.0), uniform(-0.5, 0.5)),
+                          spin_2_in=(constant(0.0), constant(0.0), uniform(-0.5, 0.5))),
+}
+
+
+@pytest.mark.parametrize("generator", EXTENTS, ids=lambda generator: generator.__name__)
+def test_a_generators_extent_attributes_are_the_draws_that_move_its_extent(generator):
+    """
+    Measured on the mismatch itself, its refusal when built passed by: a detector's own draw of one of a generator's
+    ``extent_attributes`` gives its signal an extent of its own (a white-noise burst's own band edges, its duration
+    drawn again with them), which the mismatch refuses by name as it draws; every other shape draw leaves every
+    detector's extent one, the one it records.
+    """
+    network = gf.Network([gf.IFO.H1, gf.IFO.L1])
+    streams = gf.SeedTree(2).batch("train", 0, 0).sub("wave/odd")
+    made = generator(**EXTENTS[generator])
+    assert set(generator.extent_attributes) <= set(generator.shape_attributes)
+    for draw in generator.shape_attributes:
+        violation = gf.MismatchedWaveforms((draw,))
+        if draw in generator.extent_attributes:
+            with pytest.raises(ValueError, match="extend differently"):
+                violation.generate(made, network, 16, SAMPLE_RATE, 2.0, streams)
+            continue
+        _, parameters = violation.generate(made, network, 16, SAMPLE_RATE, 2.0, streams)
+        _, real = made.generate(16, SAMPLE_RATE, 2.0, streams)
+        extent = np.broadcast_to(np.stack(
+            [np.asarray(side, np.float64) for side in made.get_signal_extent_seconds(real)], axis=-1), (16, 2))
+        np.testing.assert_array_equal(np.asarray(parameters[SIGNAL_EXTENT]), extent, err_msg=draw)
 
 
 def test_a_mismatched_binarys_detectors_carry_one_sources_loudness():
@@ -440,8 +506,8 @@ def test_a_mismatch_correlates_only_its_content():
     """
     A correlation mixes in the shared waveform, drawn with nothing differing: a burst of the same parameters where
     only its content (its noise) differs, so the mix lies inside the detectors' recorded extent. Where a parameter
-    differs, the shared waveform's own draw gives it another shape (a longer burst reaches beyond that extent; two
-    binaries' chirps beat), so a correlation is refused by name.
+    differs, the shared waveform's own draw gives it another shape (two waves' or two binaries' chirps beat), so a
+    correlation is refused by name.
     """
     for differ in (("duration_seconds",), ("noise", "duration_seconds"), ("mass_1_msun",)):
         with pytest.raises(ValueError, match="correlation mixes in the shared waveform"):
@@ -487,21 +553,26 @@ def test_a_binarys_mismatch_changes_its_chirps_shape():
 def test_a_bursts_mismatch_changes_its_shape():
     """
     A burst's amplitude, phase and polarisation eccentricity change only the amplitude and the phase each detector
-    receives one burst with, as other skies and polarisations do: a mismatch in them alone is refused.
+    receives one burst with, as other skies and polarisations do: a mismatch in them alone is refused. A
+    sine-Gaussian's every shape draw moves its envelope's length, so it takes no mismatch at all.
     """
     drawn = {"amplitude": uniform(0.5, 2.0), "phase_radians": uniform(0.0, np.pi),
              "polarization_eccentricity": uniform(0.0, 1.0)}
-    for generator, shape in (
-            (gf.SineGaussianGenerator, {"frequency_hertz": uniform(80.0, 120.0)}),
-            (gf.ChirpletGenerator, {"duration_seconds": uniform(0.2, 0.5)}),
-            (gf.RingdownGenerator, {"damping_time_seconds": uniform(0.01, 0.05)}),
-            (gf.PeriodicWaveGenerator, {"frequency_hertz": uniform(80.0, 120.0)})):
+    for generator, shape, taken in (
+            (gf.SineGaussianGenerator, {"frequency_hertz": uniform(80.0, 120.0)}, False),
+            (gf.ChirpletGenerator, {"start_frequency_hertz": uniform(40.0, 60.0)}, True),
+            (gf.RingdownGenerator, {"frequency_hertz": uniform(100.0, 200.0)}, True),
+            (gf.PeriodicWaveGenerator, {"frequency_hertz": uniform(80.0, 120.0)}, True)):
         own = {name: value for name, value in drawn.items() if name in generator.distributed_attributes}
         burst = generator(**own, **shape)
         for name in (*own, tuple(own)):
             with pytest.raises(ValueError, match="none of them a draw that changes"):
                 gf.HardExampleGenerator(burst, gf.MismatchedWaveforms(name))
-        gf.HardExampleGenerator(burst, gf.MismatchedWaveforms((*shape, *own)))
+        if taken:
+            gf.HardExampleGenerator(burst, gf.MismatchedWaveforms((*shape, *own)))
+        else:
+            with pytest.raises(ValueError, match="moves its signal's extent"):
+                gf.HardExampleGenerator(burst, gf.MismatchedWaveforms((*shape, *own)))
     with pytest.raises(ValueError, match="none of them a draw that changes"):
         gf.HardExampleGenerator(
             wnb(polarization_eccentricity=uniform(0.0, 1.0)), gf.MismatchedWaveforms("polarization_eccentricity"))

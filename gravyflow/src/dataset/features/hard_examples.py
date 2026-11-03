@@ -308,7 +308,17 @@ class MismatchedWaveforms(Violation):
     phase each detector receives them with are what other skies and
     polarisations give, and a draw of one value is the same in every detector,
     so a mismatch in those draws alone is refused. The presence and the
-    placement are shared. A parameter that differs is labelled NaN, as an
+    placement are shared, so the signal's extent, which placement reads, is
+    every detector's: a draw that moves it (the generator's
+    ``extent_attributes``: a burst's length, and a white-noise burst's band
+    edges, drawn again with its length) is refused unless it takes one value,
+    since the example placed for its longest burst would keep a detector's
+    shorter one from the window's edges where a real burst of that length
+    reaches them. So a binary differs in its masses or spins, a ringdown in
+    its frequency, a chirplet in its frequencies, a periodic wave in its
+    frequency and a white-noise burst in its noise; a sine-Gaussian, whose
+    every shape draw sets its envelope's length, takes no mismatch. A
+    parameter that differs is labelled NaN, as an
     IncoherentGenerator's is: the label as the generator returns it, so for a
     binary, which labels its heavier body body 1, a mismatch in mass_1_msun
     alone can make MASS_1_MSUN, MASS_2_MSUN or both NaN (where a detector's
@@ -337,9 +347,8 @@ class MismatchedWaveforms(Violation):
     content is independent, so the mix is a burst of the same parameters
     (Gaussian content of the same power) inside the same extent. Where a
     parameter differs, the shared waveform's own draw of it gives the mix
-    another shape (a longer burst reaches beyond the detectors' recorded
-    extent; two binaries' chirps beat, a cue in one detector alone), so a
-    correlation is refused by name. rho = 1 would be the coherent signal, a
+    another shape (two waves' or two binaries' chirps beat, a cue in one
+    detector alone), so a correlation is refused by name. rho = 1 would be the coherent signal, a
     real one, so it is refused; None is rho = 0, the waveforms' own.
     """
     differ : Tuple[str, ...]
@@ -368,8 +377,8 @@ class MismatchedWaveforms(Violation):
                     "MismatchedWaveforms' correlation mixes in the shared waveform, drawn with nothing differing, so "
                     "it holds only where the detectors differ in their content alone ('noise', a burst's): with "
                     f"{[draw for draw in differ if draw != 'noise']} differing, the shared waveform's own draw gives "
-                    "it another shape, beyond the detectors' recorded extent (a longer burst), or a beat with each "
-                    "detector's chirp (a binary's). Differ in 'noise' alone, or give correlation=None."
+                    "it another shape, a beat with each detector's wave or chirp. Differ in 'noise' alone, or give "
+                    "correlation=None."
                 )
             object.__setattr__(self, "correlation", correlation)
 
@@ -397,6 +406,17 @@ class MismatchedWaveforms(Violation):
                 "detector would receive one waveform: a real signal. Give one of them a distribution of more "
                 "than one value."
             )
+        moving = [draw for draw in self.differ
+                  if draw in generator.extent_attributes and not _draws_one_value(generator, draw)]
+        if moving:
+            free = [draw for draw in generator.shape_attributes if draw not in generator.extent_attributes]
+            raise ValueError(
+                f"MismatchedWaveforms of a {type(generator).__name__} differs in {moving}, which moves its signal's "
+                f"extent (its extent_attributes, {', '.join(generator.extent_attributes)}): the example is placed "
+                "once for every detector, as its longest signal allows, so a detector's shorter signal would never "
+                "come as near the window's edge as a real signal of its length does. Differ in a shape draw that "
+                f"leaves the extent alone ({', '.join(free) or 'it has none'})."
+            )
 
     def check_scaling(self, scaling_method):
         """A network SNR only: its detectors' waveforms have no one hrss, hpeak or distance."""
@@ -409,10 +429,15 @@ class MismatchedWaveforms(Violation):
             )
 
     def generate(self, generator, network, num_waveforms, sample_rate_hertz, duration_seconds, streams):
-        """Detector j's waveform from the streams that differ under ``comp/{j}`` (see the class)."""
+        """
+        Detector j's waveform from the streams that differ under ``comp/{j}``
+        (see the class), and the signal's extent, every detector's, refused by
+        name where one detector's differs (a draw the generator makes again
+        with a differing one, which its ``extent_attributes`` leave out).
+        """
         if network is None:
             raise ValueError("MismatchedWaveforms gives each detector its own waveform: give the generator a network.")
-        waveforms, parameters, before, after = [], [], [], []
+        waveforms, parameters, extents = [], [], []
         for j in range(_num_detectors(network)):
             routed = _MismatchedStreams(streams, self.differ, j)
             component_waveforms, component_parameters = generator.generate(
@@ -425,9 +450,14 @@ class MismatchedWaveforms(Violation):
                 )
             waveforms.append(jnp.asarray(component_waveforms))
             parameters.append(component_parameters)
-            extent = _extent(generator, component_parameters, num_waveforms)
-            before.append(extent[0])
-            after.append(extent[1])
+            extents.append(np.stack(_extent(generator, component_parameters, num_waveforms), axis=-1))
+        if any(np.any(extent != extents[0]) for extent in extents[1:]):
+            raise ValueError(
+                f"MismatchedWaveforms of a {type(generator).__name__} differing in {list(self.differ)}: its "
+                "detectors' signals extend differently, though the example is placed once for all of them, so a "
+                "draw that moves the extent came out differently in each (one the generator makes again with a "
+                "differing draw): it belongs in the generator's extent_attributes."
+            )
         waveforms = jnp.stack(waveforms, axis=1)
         if self.correlation is not None:
             rho = np.asarray(
@@ -436,7 +466,7 @@ class MismatchedWaveforms(Violation):
             rho = jnp.asarray(rho).reshape((-1, 1, 1, 1))
             waveforms = jnp.sqrt(rho) * jnp.asarray(shared)[:, None] + jnp.sqrt(1.0 - rho) * waveforms
         common = _common_values(parameters)
-        common[SIGNAL_EXTENT] = np.stack([np.max(before, axis=0), np.max(after, axis=0)], axis=-1)
+        common[SIGNAL_EXTENT] = extents[0]
         return waveforms, common
 
     def detector_balance(self, polarisations, background, sample_rate_hertz, onsource_duration_seconds):
@@ -659,7 +689,7 @@ class HardExampleGenerator(WaveformGenerator):
         return self.generator.get_max_generated_duration()
 
     def get_signal_extent_seconds(self, parameters):
-        """The extent recorded by ``generate``: the generator's, reversed with the waveform, or every detector's."""
+        """The extent ``generate`` records: the generator's, reversed with the waveform, or every detector's one."""
         extent = np.asarray(parameters[SIGNAL_EXTENT])
         return extent[..., 0], extent[..., 1]
 

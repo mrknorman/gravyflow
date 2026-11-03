@@ -157,6 +157,7 @@ class PeriodicWaveGenerator(gf.WaveformGenerator):
     # the phase each detector receives one wave with; the phase is kept out of
     # the shape for every wave shape.
     shape_attributes: ClassVar[Tuple[str, ...]] = ("frequency_hertz", "duration_seconds")
+    extent_attributes: ClassVar[Tuple[str, ...]] = ("duration_seconds",)
 
     distributed_attributes: Tuple[str] = (
         "frequency_hertz",
@@ -270,6 +271,9 @@ class SineGaussianGenerator(gf.WaveformGenerator):
     # The amplitude, the phase and the eccentricity change only the amplitude
     # and the phase each detector receives one wavelet with.
     shape_attributes: ClassVar[Tuple[str, ...]] = ("frequency_hertz", "quality_factor")
+
+    # Its envelope's length, tau = Q / (sqrt(2) pi f), is both's.
+    extent_attributes: ClassVar[Tuple[str, ...]] = ("frequency_hertz", "quality_factor")
 
     distributed_attributes: Tuple[str] = (
         "frequency_hertz",
@@ -391,6 +395,7 @@ class ChirpletGenerator(gf.WaveformGenerator):
     # and the phase each detector receives one chirplet with.
     shape_attributes: ClassVar[Tuple[str, ...]] = (
         "start_frequency_hertz", "end_frequency_hertz", "duration_seconds")
+    extent_attributes: ClassVar[Tuple[str, ...]] = ("duration_seconds",)
 
     distributed_attributes: Tuple[str] = (
         "start_frequency_hertz",
@@ -506,6 +511,7 @@ class RingdownGenerator(gf.WaveformGenerator):
     # The amplitude, the phase and the eccentricity change only the amplitude
     # and the phase each detector receives one ringdown with.
     shape_attributes: ClassVar[Tuple[str, ...]] = ("frequency_hertz", "damping_time_seconds")
+    extent_attributes: ClassVar[Tuple[str, ...]] = ("damping_time_seconds",)
 
     # A ringdown starts at its peak and decays (its damping time is
     # positive); reversed, it rises into its peak and stops there.

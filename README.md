@@ -172,8 +172,9 @@ network can receive from a real source, matched to the generator's own in everyt
 name), placement, SNR target over the present detectors, window and whitening. The violations:
 `gf.WrongDelay(margin_seconds)`, one present detector's copy shifted beyond its delay from another by their light
 travel plus the margin; `gf.OneDetector()`, the signal in one present detector alone; `gf.MismatchedWaveforms(differ)`,
-a waveform of its own in each detector, differing in the named draws that change its shape (a binary's masses or
-spins, a burst's frequencies, length or noise) and balanced to one source's loudness; and `gf.TimeReversed()`, the
+a waveform of its own in each detector, differing in the named draws that change its shape but not its extent, which
+its one placement reads (a binary's masses or spins; a ringdown's, chirplet's or periodic wave's frequencies; a
+white-noise burst's noise), and balanced to one source's loudness; and `gf.TimeReversed()`, the
 waveform reversed in time, only for a binary or a ringdown, whose reversal is a waveform no source of their kind
 makes. `ReturnVariables.VIOLATION` (B, G) labels each generator's `gf.ViolationCode` (NONE, 0, for a real signal),
 and `ReturnVariables.VIOLATION_DETECTORS` (B, G, IFO) the detectors whose copies carry it (a wrong delay's shifted

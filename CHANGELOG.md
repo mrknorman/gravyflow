@@ -150,13 +150,17 @@ repository before it may need the changes below.
   the named draws, a parameter or a burst's `"noise"`, with every other draw shared, and correlating by `correlation`,
   finite and below 1, the coherent signal, where given, which is taken only where the detectors differ in a burst's
   `"noise"` alone: independent content, so the mix is a burst of the same parameters in the same extent, where a
-  differing parameter's shared draw would give the mix another shape, beyond the recorded extent or a beat of two
-  chirps, and is refused by name); a differing parameter labelled NaN, as the generator labels it (a
+  differing parameter's shared draw would give the mix another shape, a beat of two waves or chirps, and is refused
+  by name); a differing parameter labelled NaN, as the generator labels it (a
   binary's heavier body is body 1, so a mismatch in `mass_1_msun` can make either mass's label NaN); one draw at least changes the waveform's shape and takes more
   than one value, since other skies and polarisations give waveforms alike but for the amplitude and the phase each
   detector receives them with, and a draw of one value is every detector's: the generators' `shape_attributes`, a
   binary's masses or spins, a burst's frequencies, length or noise, never its amplitude, phase or polarisation
-  eccentricity; each detector's waveform rescaled to detector 0's noise-weighted polarisation power in that
+  eccentricity; never a draw that moves the signal's extent, which the one placement of every detector reads, unless
+  it takes one value (the generators' `extent_attributes`: a burst's length, and a white-noise burst's band edges,
+  drawn again with it), since a detector's shorter burst, placed for the longest, would never come as near the
+  window's edge as a real burst of its length, so a sine-Gaussian, whose every shape draw sets its envelope's length,
+  takes no mismatch, and a detector whose extent still differs is refused as it is drawn; each detector's waveform rescaled to detector 0's noise-weighted polarisation power in that
   detector's noise, so that every detector carries one source's loudness and its SNR differs from a real signal's
   only through the antenna pattern; scaled to a network SNR only) and `gf.TimeReversed()` (the waveform reversed about its reference time: a chirp no binary makes, or
   a ringdown that rises into its peak and stops; taken only by a generator that declares its reversal leaves its
