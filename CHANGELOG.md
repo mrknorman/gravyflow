@@ -149,8 +149,10 @@ repository before it may need the changes below.
   than one value, since other skies and polarisations give waveforms alike but for the amplitude and the phase each
   detector receives them with, and a draw of one value is every detector's: the generators' `shape_attributes`, a
   binary's masses or spins, a burst's frequencies, length or noise, never its amplitude, phase or polarisation
-  eccentricity) and `gf.TimeReversed()` (the waveform reversed about its reference time: a chirp no binary makes,
-  though a reversed white-noise burst is another such burst). It draws as its generator does under its own name, and the
+  eccentricity) and `gf.TimeReversed()` (the waveform reversed about its reference time: a chirp no binary makes, or
+  a ringdown that rises into its peak and stops; taken only by a generator that declares its reversal leaves its
+  family, `time_reversal_leaves_family`, `gf.CBCGenerator` and `gf.RingdownGenerator`, and refused by name for a
+  sine-Gaussian, white-noise burst, periodic wave or chirplet, whose reversal is one of its own waveforms). It draws as its generator does under its own name, and the
   injection layer places, projects, scales over the present detectors, crops and whitens it as the generator's signals,
   so it differs in its violation alone. A wrong delay is placed as its generator's signals exactly, and its copy kept in
   the window, its whole signal, by its direction: the drawn one, or the other where only that keeps it there; a window

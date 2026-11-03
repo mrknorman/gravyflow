@@ -16,9 +16,10 @@ differs from a real one in its violation alone:
   holds the whole network SNR;
 - ``gf.MismatchedWaveforms``: each detector has a waveform of its own, its
   differing draws its own and the rest shared;
-- ``gf.TimeReversed``: the waveform runs backwards in time (for a CBC, a chirp
-  no binary makes; a reversed white-noise burst is another such burst, so for
-  a burst it is no violation).
+- ``gf.TimeReversed``: the waveform runs backwards in time, for a generator
+  whose reversal leaves its family (a binary's chirp, a ringdown); a reversed
+  sine-Gaussian, white-noise burst, periodic wave or chirplet is one its
+  generator makes, so it is refused.
 
 Each example says what it is: ``ReturnVariables.VIOLATION`` gives each
 generator's ``gf.ViolationCode`` (NONE for a real signal).
@@ -190,8 +191,17 @@ class MismatchedWaveforms:
 class TimeReversed:
     """
     The waveform reversed in time about its reference time (a CBC's merger, a
-    burst's peak) before it is projected, so the reference time is placed as a
-    real signal's is: a chirp's frequency falls into its merger.
+    ringdown's peak) before it is projected, so the reference time is placed
+    as a real signal's is: a chirp's frequency falls from its merger, a
+    ringdown rises into its peak and stops there.
+
+    Only a generator whose reversed waveform is one it never makes, whatever
+    its parameters, declares ``time_reversal_leaves_family`` and takes it:
+    gf.CBCGenerator and gf.RingdownGenerator. Any other is refused by name:
+    a sine-Gaussian's envelope is symmetric, so reversed it is the same
+    wavelet; a white-noise burst's reversal is another such burst; a periodic
+    wave's is a periodic wave; a chirplet's is a chirplet from its end
+    frequency to its start.
     """
     code : ClassVar[ViolationCode] = ViolationCode.TIME_REVERSED
 
@@ -269,7 +279,8 @@ class HardExampleGenerator(WaveformGenerator):
 
     The violations that move signal between detectors (all but TimeReversed)
     need two detectors present in every example: a network or a num_present
-    that can give fewer is refused by name.
+    that can give fewer is refused by name. TimeReversed takes only a
+    generator whose reversal leaves its family (gf.TimeReversed).
 
     ``ReturnVariables.VIOLATION`` gives each example's ``violation.code``.
     """
@@ -285,6 +296,14 @@ class HardExampleGenerator(WaveformGenerator):
             raise TypeError(
                 f"A HardExampleGenerator's violation is one of {', '.join(v.__name__ for v in VIOLATIONS)}, "
                 f"not {violation!r}."
+            )
+        if isinstance(violation, TimeReversed) and not generator.time_reversal_leaves_family:
+            raise ValueError(
+                f"A {type(generator).__name__}'s waveform reversed in time is one its generator makes (a "
+                "sine-Gaussian is the same wavelet, a white-noise burst another such burst, a periodic wave a "
+                "periodic wave, a chirplet one from its end to its start), so it is no violation: TimeReversed takes "
+                "a generator whose reversal leaves its family (time_reversal_leaves_family: a CBCGenerator, a "
+                "RingdownGenerator)."
             )
         if isinstance(violation, MismatchedWaveforms):
             known = set(generator.distributed_attributes or ()) | {"noise"}

@@ -429,6 +429,12 @@ class WaveformGenerator:
     # generator, so one that names none cannot be mismatched.
     shape_attributes : ClassVar[Tuple[str, ...]] = ()
 
+    # Whether a waveform reversed in time is one this generator never makes,
+    # whatever its parameters (gf.TimeReversed accepts only such a generator):
+    # declared by each generator, so one that declares nothing cannot be
+    # reversed.
+    time_reversal_leaves_family : ClassVar[bool] = False
+
     def __post_init__(self):
         if self.name is not None:
             check_name(self.name, "generator name")
@@ -1074,7 +1080,10 @@ class CBCGenerator(WaveformGenerator):
     # (exactly for the dominant mode alone; this holds them so for every
     # approximant), which other skies and polarisations give too.
     shape_attributes : ClassVar[Tuple[str, ...]] = ("mass_1_msun", "mass_2_msun", "spin_1_in", "spin_2_in")
-    
+
+    # A binary's frequency rises into its merger; reversed, it falls from it.
+    time_reversal_leaves_family : ClassVar[bool] = True
+
     distributed_attributes : Tuple[str] = (
         "mass_1_msun",
         "mass_2_msun",

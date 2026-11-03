@@ -507,6 +507,10 @@ class RingdownGenerator(gf.WaveformGenerator):
     # and the phase each detector receives one ringdown with.
     shape_attributes: ClassVar[Tuple[str, ...]] = ("frequency_hertz", "damping_time_seconds")
 
+    # A ringdown starts at its peak and decays (its damping time is
+    # positive); reversed, it rises into its peak and stops there.
+    time_reversal_leaves_family: ClassVar[bool] = True
+
     distributed_attributes: Tuple[str] = (
         "frequency_hertz",
         "damping_time_seconds",
