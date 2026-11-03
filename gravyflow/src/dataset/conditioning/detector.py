@@ -1177,7 +1177,7 @@ class DetectorSlot:
     def draw(self, num_examples : int, streams) -> Dict[str, np.ndarray]:
         """
         The slot's geometry in ``num_examples`` examples, from the batch's
-        ``streams`` (a gf.BatchStreams): each parameter (B,), float32, as a
+        ``streams`` (a gf.BatchStreams): each parameter (B,), float64, as a
         Network's dict takes them, with the y arm's azimuth,
         ``y_angle_radians``, from the x arm's and the opening angle.
         """
@@ -1190,11 +1190,8 @@ class DetectorSlot:
                 rng = streams.stream(f"network/{self.name}/{parameter}")
                 values = _isotropic_draw(parameter, num_examples, rng) if value is None \
                     else value.sample(num_examples, rng)
-            drawn[parameter] = np.asarray(values, dtype=np.float32)
-        opening = drawn.pop("opening_angle_radians")
-        drawn["y_angle_radians"] = (
-            drawn["x_angle_radians"].astype(np.float64) - opening.astype(np.float64)
-        ).astype(np.float32)
+            drawn[parameter] = np.asarray(values, dtype=np.float64)
+        drawn["y_angle_radians"] = drawn["x_angle_radians"] - drawn.pop("opening_angle_radians")
         return drawn
 
     def max_geocentre_distance_meters(self) -> float:
@@ -1208,8 +1205,8 @@ def detector_geometry(parameters : Dict[str, np.ndarray]) -> Dict[str, np.ndarra
     parameters (arrays of one shape, as a Network's dict names them, angles in
     radians): its Earth-fixed ``location`` (m), arm unit vectors, arm lengths
     and response tensors, with the vertex placed by the vectorised WGS84
-    conversion (``geodetic_to_earth_fixed``). A Network holds it as it is; the
-    projection reads it in float32 (``ExampleNetworks``).
+    conversion (``geodetic_to_earth_fixed``). A Network and ExampleNetworks
+    hold it as it is; the projection reads it in float32.
     """
     def f64(name):
         return np.asarray(parameters[name], dtype=np.float64)
@@ -1240,9 +1237,10 @@ _RESPONSE_COMPONENTS = ((0, 0), (1, 1), (2, 2), (0, 1), (0, 2), (1, 2))
 class ExampleNetworks:
     """
     The network of each example of one batch: each detector's geometry, as a
-    Network holds it but per example, (Batch, Detectors, ...) float32, and
-    ``present`` (Batch, Detectors), 1.0 where the detector is in the example's
-    network and 0.0 where it is not.
+    Network holds it (float64, ``detector_geometry``'s) but per example,
+    (Batch, Detectors, ...), and ``present`` (Batch, Detectors) float32, 1.0
+    where the detector is in the example's network and 0.0 where it is not.
+    The projection, the delays and the features read the geometry in float32.
 
     ``project_wave`` and ``get_time_delay`` take a Network's arguments, one
     source per example: each example is projected onto its own detectors, and
@@ -1266,7 +1264,7 @@ class ExampleNetworks:
     def stack(cls, columns : List[Dict[str, np.ndarray]], present) -> "ExampleNetworks":
         """Each detector's geometry (a dict of (Batch, ...) arrays, ``detector_geometry``'s), stacked on axis 1."""
         return cls(
-            **{name: jnp.asarray(np.stack([column[name] for column in columns], axis=1), dtype=jnp.float32)
+            **{name: np.stack([np.asarray(column[name], dtype=np.float64) for column in columns], axis=1)
                for name in cls.GEOMETRY},
             present=jnp.asarray(present, dtype=jnp.float32),
         )
@@ -1275,13 +1273,17 @@ class ExampleNetworks:
     def of_network(cls, network : "Network", num_examples : int) -> "ExampleNetworks":
         """``network``'s fixed geometry in each of ``num_examples`` examples, every detector present."""
         def tiled(value):
-            value = jnp.asarray(value, dtype=jnp.float32)
-            return jnp.broadcast_to(value, (num_examples,) + value.shape)
+            value = np.asarray(value, dtype=np.float64)
+            return np.broadcast_to(value, (num_examples,) + value.shape)
 
         return cls(
             **{name: tiled(getattr(network, name)) for name in cls.GEOMETRY},
             present=jnp.ones((num_examples, int(network.num_detectors)), dtype=jnp.float32),
         )
+
+    def _projected(self, name : str) -> np.ndarray:
+        """Geometry array ``name`` as the projection reads it: float32."""
+        return np.asarray(getattr(self, name), dtype=np.float32)
 
     @property
     def num_examples(self) -> int:
@@ -1307,7 +1309,8 @@ class ExampleNetworks:
         """Arrival time at each example's detectors minus at the geocentre, (Batch, Detectors), as Network's."""
         right_ascension, declination = self._per_example(right_ascension=right_ascension, declination=declination)
         return get_time_delay_per_example(
-            right_ascension, declination, self.location, Network.gmst_radians(gps_time_seconds, self.num_examples))
+            right_ascension, declination, self._projected("location"),
+            Network.gmst_radians(gps_time_seconds, self.num_examples))
 
     def project_wave(
         self,
@@ -1336,7 +1339,7 @@ class ExampleNetworks:
             right_ascension=right_ascension, declination=declination, polarization=polarization)
         projected = project_wave_per_example(
             ops.cast(strain, "float32"), sample_rate_hertz,
-            *(getattr(self, name) for name in self.GEOMETRY),
+            *(self._projected(name) for name in self.GEOMETRY),
             right_ascension, declination, polarization,
             Network.gmst_radians(gps_time_seconds, self.num_examples),
         )
@@ -1350,8 +1353,9 @@ class ExampleNetworks:
         components of its response tensor (x x^T - y y^T) / 2: xx, yy, zz,
         xy, xz, yz.
         """
-        position = self.location / np.float32(GEOMETRY_FEATURE_RADIUS_METERS)
-        response = jnp.stack([self.response[..., i, j] for i, j in _RESPONSE_COMPONENTS], axis=-1)
+        position = jnp.asarray(self._projected("location")) / np.float32(GEOMETRY_FEATURE_RADIUS_METERS)
+        response = self._projected("response")
+        response = jnp.stack([response[..., i, j] for i, j in _RESPONSE_COMPONENTS], axis=-1)
         return jnp.concatenate([position, response], axis=-1).astype(jnp.float32)
 
 
@@ -1468,11 +1472,11 @@ class Detectors:
         return Network(self._bundled_ifos) if self._bundled_ifos else None
 
     def _bundled_column(self, ifo : IFO, num_examples : int) -> Dict[str, np.ndarray]:
-        """A bundled detector's geometry, its Network's, in each of ``num_examples`` examples."""
+        """A bundled detector's geometry, its Network's (float64), in each of ``num_examples`` examples."""
         index = self._bundled_ifos.index(ifo)
         column = {}
         for name in ExampleNetworks.GEOMETRY:
-            value = np.asarray(getattr(self._bundled, name), dtype=np.float32)[index]
+            value = np.asarray(getattr(self._bundled, name), dtype=np.float64)[index]
             column[name] = np.broadcast_to(value, (num_examples,) + value.shape)
         return column
 

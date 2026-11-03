@@ -461,6 +461,16 @@ repository before it may need the changes below.
   bytes do not, and a set materialised before is refused by name (`FingerprintMismatch`), never served: materialise
   it again.
 
+- **A detector slot's geometry is drawn and held in float64.** `DetectorSlot.draw` rounded each drawn or fixed
+  parameter to float32, and `gf.ExampleNetworks` held each example's geometry in float32, so a slot's vertex was good
+  only to about half a metre, a fixed site's (`gf.DetectorSlot.at`, e.g. `gf.Site.I1`) included, while a Network's
+  was at lal's to 0.1 mm. A slot's parameters are now float64, from the same streams in the same order, and
+  `gf.ExampleNetworks` holds `detector_geometry`'s float64 geometry; the projection, the delays and
+  `DETECTOR_GEOMETRY` read it in float32, as a Network's projection does. A site slot's vertex is lal's to 3 mm
+  (the rounding of lal's own angles). Batches with slots change by float32 rounding of their geometry (the geometry
+  features by about 2e-7, an injection's per-detector SNR by about 1e-6); batches of bundled detectors alone, with or
+  without a drawn count of them, are unchanged, byte for byte.
+
 - **Detectors that repeat a name are refused.** A detector's noise streams are named for it, so a dataset or noise
   batcher given one detector twice (H1 and H1) served identical noise in both channels, silently; it is refused by
   name. Independent detectors with one curve are `gf.DetectorSlot`s.

@@ -316,9 +316,9 @@ def test_per_example_projection_equals_a_network_per_example():
             np.concatenate([np.asarray(network.get_time_delay(jnp.asarray(ra[b:b + 1]), jnp.asarray(dec[b:b + 1])))
                             for b, network in enumerate(references)]),
             rtol=0, atol=1e-9)
-    # Drawn geometry is each Network's, which the projection reads in float32.
+    # Drawn geometry is each Network's, in float64; the projection reads it in float32.
     for name in gf.ExampleNetworks.GEOMETRY:
-        np.testing.assert_array_equal(getattr(networks, name), getattr(own, name).astype(np.float32), err_msg=name)
+        np.testing.assert_array_equal(getattr(networks, name), getattr(own, name), err_msg=name)
 
 
 def test_each_example_has_its_own_reproducible_geometry():

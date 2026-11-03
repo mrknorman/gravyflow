@@ -40,8 +40,8 @@ RESPONSE_TOLERANCE = representation_tolerance(np.float32, 0.5, c=2)
 #: at the Earth's radius (KAGRA's two lie 1.3 mm apart).
 SITE_VERTEX_TOLERANCE_METERS = 0.5e-9 * GEOMETRY_FEATURE_RADIUS_METERS
 
-#: Representation: a slot's drawn parameters and the per-example geometry are float32, so a
-#: vertex carries a few float32 roundings of the Earth's radius (about 0.5 m each).
+#: Representation: the geometry features and the delays read a vertex in float32, so it carries
+#: a few float32 roundings of the Earth's radius (about 0.5 m each).
 EXAMPLE_VERTEX_TOLERANCE_METERS = representation_tolerance(np.float32, GEOMETRY_FEATURE_RADIUS_METERS, c=4)
 
 
@@ -139,6 +139,24 @@ def test_sites_in_a_network_beside_the_bundled_detectors(ifos):
     assert each.shape == (4, len(NETWORK)) and np.all(each > 0)
     np.testing.assert_allclose(np.sqrt(np.sum(each ** 2, axis=-1)), np.asarray(y["SNR"])[:, 0],
                                rtol=representation_tolerance(np.float32, 1.0, 2 * np.sqrt(512.0)))
+
+
+def test_a_site_slots_per_example_vertex_is_lals():
+    """
+    A fixed site slot's geometry, as each example draws it, is float64 and
+    sits at lal's vertex to the site's own precision, as a bundled detector's
+    does in a Network; the projection alone reads it in float32.
+    """
+    detectors = gf.Detectors([gf.DetectorSlot.at(site, noise_curve=gf.IFO.H1) for site in SITES])
+    streams = gf.SeedTree(1).batch("train", 0, 0)
+    for slot in detectors.slots:
+        assert all(value.dtype == np.float64 for value in slot.draw(3, streams).values()), slot.name
+    networks = detectors.sample(3, streams)
+    for name in gf.ExampleNetworks.GEOMETRY:
+        assert np.asarray(getattr(networks, name)).dtype == np.float64, name
+    expected = np.array([lal(site)["location_meters"] for site in SITES])
+    np.testing.assert_allclose(np.asarray(networks.location), np.broadcast_to(expected, (3,) + expected.shape),
+                               rtol=0, atol=SITE_VERTEX_TOLERANCE_METERS)
 
 
 def test_a_sites_arrival_times_are_lals():
