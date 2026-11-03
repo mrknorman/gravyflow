@@ -35,6 +35,7 @@ from gravyflow.src.dataset.features.waveforms.cbc import (
     Approximant
 )
 from gravyflow.src.dataset.conditioning.whiten import whiten, whitened_noise_std
+from gravyflow.src.dataset.conditioning.detector import shift_waveform
 from gravyflow.src.dataset.tools.snr import _spectrum_for
 
 class ScalingOrdinality(Enum):
@@ -355,6 +356,11 @@ class ReturnVariables(Enum):
     # in one sample), and below it for any signal of more than one sample.
     DETECTOR_SNR = ReturnVariable(27, (BATCH, GENERATOR, IFO))
 
+    # What each generator's signal is: its gf.ViolationCode, NONE (0) for a
+    # real signal and the violation's code for a hard example
+    # (gf.HardExampleGenerator), so evaluation can score each kind.
+    VIOLATION = ReturnVariable(28, (BATCH, GENERATOR))
+
     def __lt__(self, other):
         return self.value.index < other.value.index
 
@@ -413,6 +419,9 @@ class WaveformGenerator:
         "declination_radians",
         "polarization_radians",
     )
+
+    # A real signal violates nothing; a gf.HardExampleGenerator's violation.
+    violation : ClassVar = None
 
     def __post_init__(self):
         if self.name is not None:
@@ -1978,7 +1987,15 @@ class InjectionGenerator:
                   target for the type applied, and the value it implies for
                   the others (HRSS and HPEAK in physical strain; SNR by the
                   measure SNR scaling uses);
-                - CENTRAL_TIME, when requested: (Generators, Batch, IFOs).
+                - CENTRAL_TIME, when requested: (Generators, Batch, IFOs);
+                - VIOLATION, when requested: each generator's gf.ViolationCode.
+
+        Hard examples (gf.HardExampleGenerator): a violation that changes the
+        projection (a wrong delay, one detector) is drawn here, from the
+        generator's ``inject/{g}/violation/...`` streams, and applied to the
+        projected strain before it is cropped and scaled, so an SNR target is
+        still the network SNR of the detectors present; CENTRAL_TIME gives each
+        copy's arrival.
         """
         if injection_parameters:
             refuse_renamed_sky_keys(injection_parameters)
@@ -2117,6 +2134,14 @@ class InjectionGenerator:
                 input_ra, input_dec, gps_time_seconds=gps_time_seconds
             )
 
+            # A hard example's change to the projection: each copy's shift
+            # beyond its delay, and the detectors that keep the signal.
+            violation_shifts, violation_kept = (None, None) if generator.violation is None else \
+                generator.draw_projection(network, time_delays, generator_streams, label, num_inj)
+            if violation_shifts is not None:
+                violation_shifts = ops.convert_to_tensor(violation_shifts, dtype="float32")
+                time_delays = time_delays + violation_shifts
+
             # The event-time label (CENTRAL_TIME): the reference time's
             # position in the onsource window at each detector, as a fraction
             # of the window.
@@ -2138,8 +2163,14 @@ class InjectionGenerator:
                 # network, so it has no arrival time.
                 if isinstance(network, gf.ExampleNetworks):
                     normalized_time = ops.where(network.present > 0, normalized_time, np.nan)
+                if violation_kept is not None:
+                    normalized_time = ops.where(violation_kept > 0, normalized_time, np.nan)
 
                 generator_labels[ReturnVariables.CENTRAL_TIME] = normalized_time
+
+            if parameters_to_return and ReturnVariables.VIOLATION in parameters_to_return:
+                code = 0 if generator.violation is None else int(generator.violation.code)
+                generator_labels[ReturnVariables.VIOLATION] = np.full((num_inj,), code, dtype=np.float32)
 
 
             scaling_dist = gf.Curriculum.resolve(scaling_method.value, epoch)
@@ -2171,6 +2202,12 @@ class InjectionGenerator:
                     polarization=input_pol,
                     gps_time_seconds=gps_time_seconds
                 )
+                if violation_shifts is not None:
+                    projected = ops.where(
+                        violation_shifts[..., None] != 0.0,
+                        shift_waveform(projected, sample_rate, violation_shifts), projected)
+                if violation_kept is not None:
+                    projected = projected * ops.convert_to_tensor(violation_kept)[..., None]
                 start = (ops.shape(projected)[-1] - target_num_samples) // 2
                 return projected[..., start:start + target_num_samples]
 

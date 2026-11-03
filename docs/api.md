@@ -138,6 +138,12 @@ are never mixed. Each preset's files ship with the package, pinned by sha256; th
 - `Approximant`: the CBC waveform models.
 - `WNBGenerator`: white-noise bursts.
 - `IncoherentGenerator`: a different waveform in each detector.
+- `HardExampleGenerator`: a generator's signals with one violation of what a network can receive from a real source, matched to the generator's own in everything else (draws, placement, SNR target over the present detectors, window, whitening); `ReturnVariables.VIOLATION` (B, G) labels each generator's kind.
+- `WrongDelay`: one present detector's copy shifted so that its delay from another present detector is the pair's light-travel time plus a drawn margin.
+- `OneDetector`: the signal in exactly one present detector, holding the whole network SNR.
+- `MismatchedWaveforms`: a waveform of its own in each detector, differing in the named draws (parameters, or a burst's `noise`) and correlating by an optional `correlation`.
+- `TimeReversed`: the waveform reversed in time about its reference time.
+- `ViolationCode`: the codes `ReturnVariables.VIOLATION` gives: NONE 0, WRONG_DELAY 1, ONE_DETECTOR 2, MISMATCHED_WAVEFORMS 3, TIME_REVERSED 4.
 - `WaveformParameter`: one waveform parameter and its label.
 - `WaveformParameters`: the waveform parameters a dataset can return.
 - `ScalingMethod`: how injections are scaled (SNR, HRSS or HPEAK), or placed at a physical distance

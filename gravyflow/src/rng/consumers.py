@@ -29,11 +29,15 @@ _LEAVES = tuple(re.compile(pattern) for pattern in (
     rf"augment/{_SEGMENT}",
     r"partner/choice",
     # A waveform generator's own draws, one stream per attribute so adding an
-    # attribute shifts nothing else; an incoherent generator's components
-    # draw under comp/{j}.
+    # attribute shifts nothing else; an incoherent generator's components, and
+    # a mismatched hard example's differing draws, draw under comp/{j}; a
+    # mismatched hard example's correlation with its shared waveform.
     rf"wave/{_SEGMENT}(/comp/[0-9]+)*/(param/{_SEGMENT}(/[0-9]+)?|noise|chance)",
-    # The injection layer's draws, per generator.
+    rf"wave/{_SEGMENT}/violation/correlation",
+    # The injection layer's draws, per generator: its placement, and a hard
+    # example's violation of the projection (gf.HardExampleGenerator).
     rf"inject/{_SEGMENT}/shift",
+    rf"inject/{_SEGMENT}/violation/(detector|partner|sign|margin)",
     rf"(sky|pol|scale)/{_SEGMENT}",
     r"pool/assign",
     # A dataset's networks drawn per example (gf.Detectors): one stream per

@@ -138,6 +138,22 @@ repository before it may need the changes below.
 
 ### Added
 
+- **Hard examples.** `gf.HardExampleGenerator(generator, violation)` gives a generator's signals with one
+  violation of what a detector network can receive from a real source: `gf.WrongDelay(margin_seconds)` (one present
+  detector's copy shifted so that its delay from another present detector, the example's own pair, is their
+  light-travel time plus a margin drawn per example), `gf.OneDetector()` (the signal in exactly one present detector,
+  which holds the whole network SNR target), `gf.MismatchedWaveforms(differ, correlation=None)` (a waveform of its own
+  in each detector, differing in the named draws, a parameter or a burst's `"noise"`, with every other draw shared,
+  and correlating by `correlation` where given) and `gf.TimeReversed()` (the waveform reversed about its reference
+  time: a chirp no binary makes). It draws as its generator does under its own name, and the injection layer places,
+  projects, scales over the present detectors, crops and whitens it as the generator's signals, so it differs in its
+  violation alone; a wrong delay's placement allows for its shifted copy, which stays in the window. The violations'
+  own draws have streams of their own (`inject/{g}/violation/{detector,partner,sign,margin}`,
+  `wave/{g}/violation/correlation`, and `wave/{g}/comp/{j}/...` for a detector's differing draws): every existing
+  stream draws as before. `ReturnVariables.VIOLATION` (B, G) gives each generator's `gf.ViolationCode` (NONE, 0, for
+  a real signal), and `CENTRAL_TIME` each copy's arrival (NaN where one detector holds the signal and another none).
+  A violation that needs two detectors present refuses a network or `num_present` that can give fewer.
+
 - **Sites for test networks: LIGO-India, KAGRA and the Einstein Telescope.** `gf.Site` bundles the sites of I1, K1
   and the Einstein Telescope's triangle E1, E2 and E3: each vertex's latitude, longitude and elevation and each arm's
   azimuth and altitude as lal 7.7.1 caches them (`LIO_4k`, `KAGRA`, `ET1_T1400308` to `ET3_T1400308`), with their

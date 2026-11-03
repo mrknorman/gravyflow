@@ -1587,7 +1587,8 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         }
         for key in self.variables_to_return:
             if isinstance(key, (gf.WaveformParameters, gf.ScalingTypes)) \
-                    or key is gf.ReturnVariables.CENTRAL_TIME or key in gf.INJECTION_RECORDS:
+                    or key in (gf.ReturnVariables.CENTRAL_TIME, gf.ReturnVariables.VIOLATION) \
+                    or key in gf.INJECTION_RECORDS:
                 value = labels.get(key)
                 batch[key] = _batch_first(value) if value is not None else \
                     ops.full(self.batch_contract.shape(key), np.nan, dtype="float32")
