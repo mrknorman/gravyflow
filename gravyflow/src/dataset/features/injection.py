@@ -1422,6 +1422,15 @@ class IncoherentGenerator(WaveformGenerator):
         self.allow_partially_out_of_window = first.allow_partially_out_of_window
         self.network = first.network
 
+    def specification(self) -> dict:
+        """
+        The injection by content (``utils.fingerprint.canonical`` reads it):
+        its components, in detector order, its name and its network. It
+        inherits the base's dataclass fields but is built from its components,
+        so those fields alone would leave the components out.
+        """
+        return {"component_generators": self.component_generators, "name": self.name, "network": self.network}
+
     @property
     def network(self):
         return self._network

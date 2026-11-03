@@ -541,6 +541,25 @@ def test_incoherent_generator():
     assert np.all(np.isnan(parameters[gf_inj.WaveformParameters.DURATION_SECONDS]))
 
 
+def test_an_incoherent_generators_fingerprint_reads_its_components():
+    """
+    Two incoherent generators that differ only in a component fingerprint differently, and one rebuilt alike
+    identically: a dataset's cache identity reads what each detector receives.
+    """
+    from gravyflow.src.utils.fingerprint import config_fingerprint
+    network = [gf.IFO.L1, gf.IFO.H1]
+
+    def incoherent(duration=0.4, name=None):
+        return gf_inj.IncoherentGenerator(
+            [wnb(network=network), wnb(duration_seconds=constant(duration), network=network)], name=name)
+
+    assert config_fingerprint(incoherent()) == config_fingerprint(incoherent())
+    assert config_fingerprint(incoherent()) != config_fingerprint(incoherent(duration=0.3))
+    assert config_fingerprint(incoherent()) != config_fingerprint(incoherent(name="other"))
+    swapped = gf_inj.IncoherentGenerator(list(reversed(incoherent().component_generators)))
+    assert config_fingerprint(incoherent()) != config_fingerprint(swapped)
+
+
 def test_incoherent_generator_init_mismatch():
     first, second = gf_inj.WNBGenerator(), gf_inj.WNBGenerator()
     first.network = gf.Network([gf.IFO.L1])
