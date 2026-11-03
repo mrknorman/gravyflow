@@ -436,6 +436,29 @@ def test_a_wrong_delays_margin_lies_above_the_delays_resolution():
     gf.WrongDelay(uniform(2.0 * MIN_MARGIN_SECONDS, 0.03))
 
 
+def test_a_mismatch_correlates_only_its_content():
+    """
+    A correlation mixes in the shared waveform, drawn with nothing differing: a burst of the same parameters where
+    only its content (its noise) differs, so the mix lies inside the detectors' recorded extent. Where a parameter
+    differs, the shared waveform's own draw gives it another shape (a longer burst reaches beyond that extent; two
+    binaries' chirps beat), so a correlation is refused by name.
+    """
+    for differ in (("duration_seconds",), ("noise", "duration_seconds"), ("mass_1_msun",)):
+        with pytest.raises(ValueError, match="correlation mixes in the shared waveform"):
+            gf.MismatchedWaveforms(differ, correlation=0.5)
+    network = gf.Network([gf.IFO.H1, gf.IFO.L1])
+    hard = gf.HardExampleGenerator(wnb(network=network, duration_seconds=uniform(0.05, 0.4)),
+                                   gf.MismatchedWaveforms("noise", correlation=0.5), name="mixed")
+    waveforms, parameters = hard.generate(64, SAMPLE_RATE, 2.0, gf.SeedTree(2).batch("train", 0, 0).sub("wave/mixed"))
+    waveforms = np.asarray(waveforms)
+    before, after = hard.get_signal_extent_seconds(parameters)
+    time = (np.arange(waveforms.shape[-1]) - waveforms.shape[-1] // 2) / SAMPLE_RATE
+    support = np.any(waveforms != 0.0, axis=(1, 2))
+    # Two samples for the burst's taper and its reference sample's rounding.
+    outside = (time[None] < -before[:, None] - 2.0 / SAMPLE_RATE) | (time[None] > after[:, None] + 2.0 / SAMPLE_RATE)
+    assert not np.any(support & outside)
+
+
 def test_a_mismatched_correlation_is_finite_and_below_one():
     """A NaN correlation is refused by name, never served as a batch of NaN; rho = 1, the coherent signal, is a real one."""
     for correlation in (1.5, 1.0, uniform(0.5, 1.0), float("nan"), constant(float("nan")), uniform(0.0, float("nan"))):

@@ -148,9 +148,10 @@ repository before it may need the changes below.
   holds what the real signal gives it, a real detector's loudness, and the network SNR, which the SNR label
   measures, is that detector's alone), `gf.MismatchedWaveforms(differ, correlation=None)` (a waveform of its own in each detector, differing in
   the named draws, a parameter or a burst's `"noise"`, with every other draw shared, and correlating by `correlation`,
-  finite and below 1, the coherent signal, where given (realised for independent content, a burst's noise; for a
-  binary whose masses differ it scatters around it, and each detector's mix is the beat of two chirps, a one-detector
-  cue, so a binary takes `correlation=None`); a differing parameter labelled NaN, as the generator labels it (a
+  finite and below 1, the coherent signal, where given, which is taken only where the detectors differ in a burst's
+  `"noise"` alone: independent content, so the mix is a burst of the same parameters in the same extent, where a
+  differing parameter's shared draw would give the mix another shape, beyond the recorded extent or a beat of two
+  chirps, and is refused by name); a differing parameter labelled NaN, as the generator labels it (a
   binary's heavier body is body 1, so a mismatch in `mass_1_msun` can make either mass's label NaN); one draw at least changes the waveform's shape and takes more
   than one value, since other skies and polarisations give waveforms alike but for the amplitude and the phase each
   detector receives them with, and a draw of one value is every detector's: the generators' `shape_attributes`, a

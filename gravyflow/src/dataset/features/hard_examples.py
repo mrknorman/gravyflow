@@ -332,14 +332,15 @@ class MismatchedWaveforms(Violation):
     example from ``wave/{g}/violation/correlation``) mixes in the shared
     waveform, the one drawn with nothing differing: detector j's is
     sqrt(rho) h_shared + sqrt(1 - rho) h_j, so any two detectors' waveforms
-    correlate by rho. That holds for independent content, a white-noise
-    burst's noise, for which the mix is a burst of the same parameters
-    (Gaussian content of the same power). For a binary whose masses differ,
-    the two chirps are not independent, so the realised correlation scatters
-    around rho; and each detector's mix is the beat of two chirps, not any one
-    binary's chirp, a cue a model can read in one detector alone. So give a
-    binary correlation=None. rho = 1 would be the coherent signal, a real one,
-    so it is refused; None is rho = 0, the waveforms' own.
+    correlate by rho. It is taken only where the detectors differ in their
+    content alone (``differ`` is ``"noise"``, a white-noise burst's): the
+    content is independent, so the mix is a burst of the same parameters
+    (Gaussian content of the same power) inside the same extent. Where a
+    parameter differs, the shared waveform's own draw of it gives the mix
+    another shape (a longer burst reaches beyond the detectors' recorded
+    extent; two binaries' chirps beat, a cue in one detector alone), so a
+    correlation is refused by name. rho = 1 would be the coherent signal, a
+    real one, so it is refused; None is rho = 0, the waveforms' own.
     """
     differ : Tuple[str, ...]
     correlation : Union[None, float, "gf.Distribution"] = None
@@ -361,6 +362,14 @@ class MismatchedWaveforms(Violation):
                 raise ValueError(
                     f"MismatchedWaveforms' correlation lies in [0, 1) (1 is the coherent signal, a real one); "
                     f"{correlation!r} reaches {low:g} to {high:g}."
+                )
+            if differ != ("noise",):
+                raise ValueError(
+                    "MismatchedWaveforms' correlation mixes in the shared waveform, drawn with nothing differing, so "
+                    "it holds only where the detectors differ in their content alone ('noise', a burst's): with "
+                    f"{[draw for draw in differ if draw != 'noise']} differing, the shared waveform's own draw gives "
+                    "it another shape, beyond the detectors' recorded extent (a longer burst), or a beat with each "
+                    "detector's chirp (a binary's). Differ in 'noise' alone, or give correlation=None."
                 )
             object.__setattr__(self, "correlation", correlation)
 
