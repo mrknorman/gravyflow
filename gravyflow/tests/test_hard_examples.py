@@ -10,6 +10,7 @@ import gravyflow as gf
 from gravyflow.src.dataset.conditioning.detector import C
 from gravyflow.src.dataset.features.injection import SIGNAL_EXTENT
 from gravyflow.src.rng.consumers import check_consumer
+from gravyflow.tests import test_injection
 from gravyflow.tests._helpers import representation_tolerance
 
 RV = gf.ReturnVariables
@@ -333,6 +334,35 @@ def test_a_hard_examples_fingerprint_is_its_generator_and_violation():
     assert len(prints) == 4
     assert canonical(gf.HardExampleGenerator(ringdown(), gf.TimeReversed())) == \
         canonical(gf.HardExampleGenerator(ringdown(), gf.TimeReversed()))
+
+
+@pytest.mark.parametrize("setting", sorted(test_injection.CHANGED_SETTINGS))
+def test_a_hard_examples_fingerprint_reads_its_own_settings(setting):
+    """
+    A hard example's settings, its generator's when it is built, are its own, and the injection layer reads them
+    from it: one changed after it is built moves its fingerprint, as it moves its batches.
+    """
+    from gravyflow.src.utils.fingerprint import config_fingerprint
+    changed = gf.HardExampleGenerator(wnb(), gf.OneDetector())
+    setattr(changed, setting, test_injection.CHANGED_SETTINGS[setting]())
+    assert config_fingerprint(changed) != config_fingerprint(gf.HardExampleGenerator(wnb(), gf.OneDetector()))
+
+
+def test_a_hard_examples_injection_chance_is_its_own():
+    """
+    Its injection chance decides which examples hold a signal, as for any generator, whatever its generator's
+    is: set to 1 after it is built (as the validator sets it), every example holds one.
+    """
+    streams = gf.SeedTree(2).batch("train", 0, 0).sub("wave/hard")
+    hard = gf.HardExampleGenerator(wnb(injection_chance=0.5), gf.OneDetector(), name="hard")
+    halved = np.asarray(hard.generate(64, SAMPLE_RATE, 1.0, streams)[0])
+    assert 0 < np.sum(np.all(halved == 0.0, axis=(1, 2))) < 64
+    # The presence is drawn as its generator's would be, from the hard example's own chance stream.
+    np.testing.assert_array_equal(halved, np.asarray(
+        wnb(injection_chance=0.5, name="hard").generate(64, SAMPLE_RATE, 1.0, streams)[0]))
+    hard.injection_chance = 1.0
+    every = np.asarray(hard.generate(64, SAMPLE_RATE, 1.0, streams)[0])
+    assert not np.any(np.all(every == 0.0, axis=(1, 2)))
 
 
 def test_a_wrong_delays_margin_lies_above_the_delays_resolution():

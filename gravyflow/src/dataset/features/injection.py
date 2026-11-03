@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Union, List, Dict, Type, List
 import json
 from copy import copy, deepcopy
-from dataclasses import replace
+from dataclasses import fields, replace
 from itertools import count
 from warnings import warn
 
@@ -468,6 +468,15 @@ class WaveformGenerator:
                     f"{attribute} should be a float, a gf.Distribution or None."
                 )
 
+    def _settings(self) -> dict:
+        """
+        The settings every waveform generator holds (the base's fields), as
+        this one holds them: the start of the specification of a generator
+        built from others (gf.IncoherentGenerator, gf.HardExampleGenerator),
+        whose own settings the injection layer reads, so they fingerprint it.
+        """
+        return {field.name: getattr(self, field.name) for field in fields(WaveformGenerator)}
+
     @property
     def stream_label(self) -> str:
         """The generator's name in stream paths when it is called directly."""
@@ -736,11 +745,9 @@ class WaveformGenerator:
             streams.key("chance"), p=self.injection_chance, shape=(num_waveforms,)
         )
         mask = ops.cast(mask, waveforms.dtype)
-        
-        # Reshape for broadcasting: (Batch, 1, 1)
-        # Assuming waveforms is (Batch, Channels, Time)
-        mask = ops.reshape(mask, (num_waveforms, 1, 1))
-        
+        # One value per waveform, (Batch, 1, ...): (Batch, 2, Time)
+        # polarisations, or (Batch, Detectors, 2, Time) for one per detector.
+        mask = ops.reshape(mask, (num_waveforms,) + (1,) * (len(ops.shape(waveforms)) - 1))
         return waveforms * mask
 
     def ensure_list_of_floats(
@@ -1452,9 +1459,12 @@ class IncoherentGenerator(WaveformGenerator):
     as many detectors as it has components.
 
     The components are one signal: one presence (drawn once, from this
-    generator's ``chance`` stream, with component 0's injection_chance), one
-    placement, sky and scaling (component 0's scaling method, padding and
-    allow_partially_out_of_window), one mask value per example. HRSS and
+    generator's ``chance`` stream, with its injection_chance), one placement,
+    sky and scaling, one mask value per example. Those settings are this
+    generator's own, the injection layer reads them from it, and they
+    fingerprint it: its scaling method, injection chance, padding and
+    allow_partially_out_of_window are component 0's when it is built, its sky
+    and reference time the base's defaults; a component's own are not read. HRSS and
     HPEAK measure the whole injection: the root-sum-square over the
     detectors, and the loudest detector's peak. Each component draws its
     waveform from its own streams (``comp/{j}``).
@@ -1487,11 +1497,11 @@ class IncoherentGenerator(WaveformGenerator):
     def specification(self) -> dict:
         """
         The injection by content (``utils.fingerprint.canonical`` reads it):
-        its components, in detector order, its name and its network. It
-        inherits the base's dataclass fields but is built from its components,
-        so those fields alone would leave the components out.
+        its own settings (``_settings``, its name and network among them) and
+        its components, in detector order. It is built from its components, so
+        the base's fields alone would leave them out.
         """
-        return {"component_generators": self.component_generators, "name": self.name, "network": self.network}
+        return {**self._settings(), "component_generators": self.component_generators}
 
     @property
     def network(self):

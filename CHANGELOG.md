@@ -159,7 +159,9 @@ repository before it may need the changes below.
   only through the antenna pattern; scaled to a network SNR only) and `gf.TimeReversed()` (the waveform reversed about its reference time: a chirp no binary makes, or
   a ringdown that rises into its peak and stops; taken only by a generator that declares its reversal leaves its
   family, `time_reversal_leaves_family`, `gf.CBCGenerator` and `gf.RingdownGenerator`, and refused by name for a
-  sine-Gaussian, white-noise burst, periodic wave or chirplet, whose reversal is one of its own waveforms). It draws as its generator does under its own name, and the
+  sine-Gaussian, white-noise burst, periodic wave or chirplet, whose reversal is one of its own waveforms). Its
+  scaling method, injection chance, padding, sky and reference time are its own, its generator's when it is built:
+  the injection layer reads them from it, and they fingerprint it beside its generator and violation. It draws as its generator does under its own name, and the
   injection layer places, projects, scales over the present detectors, crops and whitens it as the generator's signals,
   so it differs in its violation alone. A wrong delay is placed as its generator's signals exactly, and its copy kept where
   the generator places its signals' reference times (its whole signal at least the detector margin from the window's
@@ -516,9 +518,12 @@ repository before it may need the changes below.
 - **An incoherent generator is fingerprinted by its components.** `gf.IncoherentGenerator` inherits the generator
   base's dataclass fields but is built from its components, so a fingerprint read those fields alone: two incoherent
   generators that differed only in a component (a burst's duration in one detector) fingerprinted the same, and a set
-  materialised for one could be served for the other. It now has a `specification()`: its components, in detector
-  order, its name and its network. The fingerprint of every dataset with an incoherent generator changes, so a set
-  materialised before is never served for it: materialise it again. Every other dataset keeps its fingerprint.
+  materialised for one could be served for the other. It now has a `specification()`: its own settings (the base's
+  fields: its scaling method, injection chance, padding, allow_partially_out_of_window, sky, reference time, name and
+  network, which the injection layer reads from it, component 0's when it is built) and its components, in detector
+  order, so a setting changed after it is built (as the validator changes them) changes its fingerprint too. The
+  fingerprint of every dataset with an incoherent generator changes, so a set materialised before is never served for
+  it: materialise it again. Every other dataset keeps its fingerprint.
 
 - **Detectors that repeat a name are refused.** A detector's noise streams are named for it, so a dataset or noise
   batcher given one detector twice (H1 and H1) served identical noise in both channels, silently; it is refused by

@@ -560,6 +560,37 @@ def test_an_incoherent_generators_fingerprint_reads_its_components():
     assert config_fingerprint(incoherent()) != config_fingerprint(swapped)
 
 
+#: A new value for each setting every waveform generator holds, as a change after it is built (the validator's).
+CHANGED_SETTINGS = {
+    "scaling_method": lambda: gf.ScalingMethod(constant(8.0), gf.ScalingTypes.SNR),
+    "injection_chance": lambda: 0.25,
+    "front_padding_duration_seconds": lambda: 0.1,
+    "back_padding_duration_seconds": lambda: 0.1,
+    "allow_partially_out_of_window": lambda: True,
+    "right_ascension_radians": lambda: constant(1.0),
+    "declination_radians": lambda: constant(0.5),
+    "polarization_radians": lambda: constant(0.2),
+    "reference_gps_time_seconds": lambda: 1.0e9,
+}
+
+
+@pytest.mark.parametrize("setting", sorted(CHANGED_SETTINGS))
+def test_an_incoherent_generators_fingerprint_reads_its_own_settings(setting):
+    """
+    An incoherent generator's settings, component 0's when it is built, are its own, and the injection layer
+    reads them from it: one changed after it is built moves its fingerprint, as it moves its batches.
+    """
+    from gravyflow.src.utils.fingerprint import config_fingerprint
+    network = [gf.IFO.L1, gf.IFO.H1]
+
+    def incoherent():
+        return gf_inj.IncoherentGenerator([wnb(network=network), wnb(network=network)])
+
+    changed = incoherent()
+    setattr(changed, setting, CHANGED_SETTINGS[setting]())
+    assert config_fingerprint(changed) != config_fingerprint(incoherent())
+
+
 def test_incoherent_generator_init_mismatch():
     first, second = gf_inj.WNBGenerator(), gf_inj.WNBGenerator()
     first.network = gf.Network([gf.IFO.L1])

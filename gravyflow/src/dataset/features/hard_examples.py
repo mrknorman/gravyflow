@@ -26,6 +26,7 @@ Each example says what it is: ``ReturnVariables.VIOLATION`` gives each
 generator's ``gf.ViolationCode`` (NONE for a real signal).
 """
 
+from copy import copy
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import ClassVar, Optional, Tuple, Union
@@ -312,8 +313,11 @@ class HardExampleGenerator(WaveformGenerator):
     It draws as the generator does, from its distributions, but under its own
     name (``name``, default its position and class), so its examples are
     independent of the generator's own in a dataset beside it. Its scaling
-    method, injection chance, padding, sky and reference time are the
-    generator's; its network is the generator's, or the dataset's. Placement,
+    method, injection chance, padding, sky and reference time are its own,
+    the generator's when it is built: the injection layer reads them from it,
+    and they fingerprint it, so one changed afterwards (as the validator
+    does) changes the hard example, and the generator's are not read. Its
+    network is the generator's, or the dataset's. Placement,
     the SNR target over the present detectors, the window and whitening are
     the injection layer's, as for the generator, so a hard example sits in the
     window as a real signal does (a wrong delay keeps its shifted copy where
@@ -385,8 +389,12 @@ class HardExampleGenerator(WaveformGenerator):
         self._check_scaling()
 
     def specification(self) -> dict:
-        """The hard example by content (``utils.fingerprint.canonical`` reads it): its generator, violation, name and network."""
-        return {"generator": self.generator, "violation": self.violation, "name": self.name, "network": self.network}
+        """
+        The hard example by content (``utils.fingerprint.canonical`` reads it):
+        its own settings (``_settings``, its name and network among them), its
+        generator and its violation.
+        """
+        return {**self._settings(), "generator": self.generator, "violation": self.violation}
 
     @property
     def network(self):
@@ -482,21 +490,27 @@ class HardExampleGenerator(WaveformGenerator):
         common values.
         """
         streams = self.resolve_streams(streams)
+        # Every example drawn, then its presence its own (the hard example's
+        # injection chance, from its own chance stream), as a generator's is.
+        generator = copy(self.generator)
+        generator.injection_chance = 1.0
         if isinstance(self.violation, MismatchedWaveforms):
-            return self._mismatched(num_waveforms, sample_rate_hertz, duration_seconds, streams)
-        waveforms, parameters = self.generator.generate(num_waveforms, sample_rate_hertz, duration_seconds, streams)
-        before, after = self._extent(self.generator.get_signal_extent_seconds(parameters), num_waveforms)
-        if isinstance(self.violation, TimeReversed):
-            waveforms = _reflect(waveforms)
-            before, after = after, before
-        parameters[SIGNAL_EXTENT] = np.stack([before, after], axis=-1)
-        return waveforms, parameters
+            waveforms, parameters = self._mismatched(
+                generator, num_waveforms, sample_rate_hertz, duration_seconds, streams)
+        else:
+            waveforms, parameters = generator.generate(num_waveforms, sample_rate_hertz, duration_seconds, streams)
+            before, after = self._extent(generator.get_signal_extent_seconds(parameters), num_waveforms)
+            if isinstance(self.violation, TimeReversed):
+                waveforms = _reflect(waveforms)
+                before, after = after, before
+            parameters[SIGNAL_EXTENT] = np.stack([before, after], axis=-1)
+        return self.apply_injection_chance(waveforms, streams), parameters
 
     @staticmethod
     def _extent(extent, num_waveforms : int):
         return tuple(np.broadcast_to(np.asarray(side, dtype=np.float64), (num_waveforms,)) for side in extent)
 
-    def _mismatched(self, num_waveforms, sample_rate_hertz, duration_seconds, streams):
+    def _mismatched(self, generator, num_waveforms, sample_rate_hertz, duration_seconds, streams):
         """Detector j's waveform from the streams that differ under ``comp/{j}`` (see MismatchedWaveforms)."""
         if self.network is None:
             raise ValueError("MismatchedWaveforms gives each detector its own waveform: give the generator a network.")
@@ -504,24 +518,24 @@ class HardExampleGenerator(WaveformGenerator):
         waveforms, parameters, before, after = [], [], [], []
         for j in range(self._num_detectors(self.network)):
             routed = _MismatchedStreams(streams, violation.differ, j)
-            component_waveforms, component_parameters = self.generator.generate(
+            component_waveforms, component_parameters = generator.generate(
                 num_waveforms, sample_rate_hertz, duration_seconds, routed)
             unused = [draw for draw in violation.differ if draw not in routed.routed]
             if unused:
                 raise ValueError(
-                    f"MismatchedWaveforms differs in {unused}, which {type(self.generator).__name__} drew "
+                    f"MismatchedWaveforms differs in {unused}, which {type(generator).__name__} drew "
                     "nothing from: its waveforms would not differ there."
                 )
             waveforms.append(jnp.asarray(component_waveforms))
             parameters.append(component_parameters)
-            extent = self._extent(self.generator.get_signal_extent_seconds(component_parameters), num_waveforms)
+            extent = self._extent(generator.get_signal_extent_seconds(component_parameters), num_waveforms)
             before.append(extent[0])
             after.append(extent[1])
         waveforms = jnp.stack(waveforms, axis=1)
         if violation.correlation is not None:
             rho = np.asarray(
                 violation.correlation.sample(num_waveforms, streams.stream("violation/correlation")), dtype=np.float32)
-            shared, _ = self.generator.generate(num_waveforms, sample_rate_hertz, duration_seconds, streams)
+            shared, _ = generator.generate(num_waveforms, sample_rate_hertz, duration_seconds, streams)
             rho = jnp.asarray(rho).reshape((-1, 1, 1, 1))
             waveforms = jnp.sqrt(rho) * jnp.asarray(shared)[:, None] + jnp.sqrt(1.0 - rho) * waveforms
         common = _common_values(parameters)
