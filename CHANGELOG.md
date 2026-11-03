@@ -154,9 +154,11 @@ repository before it may need the changes below.
   family, `time_reversal_leaves_family`, `gf.CBCGenerator` and `gf.RingdownGenerator`, and refused by name for a
   sine-Gaussian, white-noise burst, periodic wave or chirplet, whose reversal is one of its own waveforms). It draws as its generator does under its own name, and the
   injection layer places, projects, scales over the present detectors, crops and whitens it as the generator's signals,
-  so it differs in its violation alone. A wrong delay is placed as its generator's signals exactly, and its copy kept in
-  the window, its whole signal, by its direction: the drawn one, or the other where only that keeps it there; a window
-  too short for that is refused by name when the dataset is built. The violations' own draws have streams of their own
+  so it differs in its violation alone. A wrong delay is placed as its generator's signals exactly, and its copy kept where
+  the generator places its signals' reference times (its whole signal at least the detector margin from the window's
+  edges, as a real signal's is, and inside the padding), by its direction: the drawn one, or the other where only that
+  keeps it there, so a copy sits against the window's edges no more often than a real signal; a window or padding too
+  narrow for that is refused by name when the dataset is built. The violations' own draws have streams of their own
   (`inject/{g}/violation/{detector,partner,sign,margin}`, `wave/{g}/violation/correlation`, and
   `wave/{g}/comp/{j}/...` for a detector's differing draws): every existing stream draws as before.
   `ReturnVariables.VIOLATION` (B, G) gives each generator's `gf.ViolationCode` (NONE, 0, for a real signal),

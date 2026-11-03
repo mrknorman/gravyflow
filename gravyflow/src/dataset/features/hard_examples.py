@@ -11,7 +11,8 @@ differs from a real one in its violation alone:
 
 - ``gf.WrongDelay``: one present detector's copy is shifted so that its delay
   from another present detector is that pair's light-travel time plus a margin,
-  in the direction that keeps it in the window where only one does;
+  in the direction that keeps it where the generator places its signals where
+  only one does;
 - ``gf.OneDetector``: the signal is in exactly one present detector, which then
   holds the whole network SNR;
 - ``gf.MismatchedWaveforms``: each detector has a waveform of its own, its
@@ -97,13 +98,17 @@ class WrongDelay:
     streams. The pair is the example's own, so a network drawn per example
     (gf.Detectors) is respected, and ``CENTRAL_TIME`` gives the shifted arrival.
 
-    The example is placed as the generator's signals are, exactly, and the copy
-    is kept in the window by its direction: the drawn one, or the other where
-    only that keeps the copy (its whole signal, unless the generator allows
-    partial signals) in the window. A window too short for that whatever the
-    placement, shorter than twice the farthest shift (the network's longest
-    light travel plus the largest margin) beside the generator's longest
-    signal, is refused by name when the dataset is built.
+    The example is placed as the generator's signals are, exactly, and the
+    copy's reference time is kept where the generator places its signals'
+    reference times (``placement_bounds_seconds``: its whole signal at least
+    the detector margin from the window's edges, unless the generator allows
+    partial signals, and inside the padding), by its direction: the drawn
+    one, or the other where only that keeps it there. So the copy sits
+    against the window's edges no more often than a real signal does. Bounds
+    narrower than twice the farthest shift (the network's longest light
+    travel plus the largest margin), for the generator's longest signal,
+    cannot hold the copy whatever the placement and are refused by name when
+    the dataset is built.
     """
     margin_seconds : Union[float, "gf.Distribution"]
 
@@ -275,8 +280,8 @@ class HardExampleGenerator(WaveformGenerator):
     generator's; its network is the generator's, or the dataset's. Placement,
     the SNR target over the present detectors, the window and whitening are
     the injection layer's, as for the generator, so a hard example sits in the
-    window as a real signal does (a wrong delay keeps its shifted copy there
-    by the copy's direction, gf.WrongDelay).
+    window as a real signal does (a wrong delay keeps its shifted copy where
+    its generator places signals by the copy's direction, gf.WrongDelay).
 
     The violations that move signal between detectors (all but TimeReversed)
     need two detectors present in every example: a network or a num_present
@@ -401,29 +406,30 @@ class HardExampleGenerator(WaveformGenerator):
     def placement_range_seconds(self, window_seconds : float):
         """
         The generator's. A wrong delay refuses a window that cannot hold its
-        shifted copy whatever the placement: one shorter than twice the
-        farthest shift beside the generator's longest signal (its reference
-        time alone, if the generator allows partial signals).
+        shifted copy whatever the placement: its copy is kept where the
+        generator places its signals' reference times (gf.WrongDelay), so
+        those bounds must be twice the farthest shift wide for any signal of
+        the generator, its longest put either side of its reference time.
         """
+        low, high = super().placement_range_seconds(window_seconds)
         reach = self._reach_seconds(self.network)
         if reach > 0.0:
-            partial = self.allow_partially_out_of_window
-            signal = 0.0 if partial else float(self.generator.get_max_generated_duration())
-            if 2.0 * reach + signal > window_seconds:
-                held = "its reference time" if partial else f"its signal (up to {signal:g} s long)"
+            signal = float(self.generator.get_max_generated_duration())
+            extents = {SIGNAL_EXTENT: np.array([[signal, 0.0], [0.0, signal]])}
+            narrowest, widest, too_long = self.placement_bounds_seconds(
+                extents, window_seconds, 2, range_seconds=(low, high))
+            width = 0.0 if np.any(too_long) else float(np.min(widest - narrowest))
+            if 2.0 * reach > width:
+                held = "its reference time" if self.allow_partially_out_of_window else \
+                    f"its signal (up to {signal:g} s long) and the detector margin"
                 raise ValueError(
                     f"A WrongDelay hard example shifts its copy up to {reach:g} s from its partner's arrival (the "
-                    f"network's longest light travel plus the largest margin), either way, and keeps {held} in the "
-                    f"window: that needs a window of {2.0 * reach + signal:g} s, not {window_seconds:g} s. Give a "
-                    "smaller margin or a longer window."
+                    f"network's longest light travel plus the largest margin), either way, and keeps it where its "
+                    f"generator places reference times, which leaves {held} in the window: that needs a "
+                    f"placement {2.0 * reach:g} s wide, but the {window_seconds:g} s window and the padding give "
+                    f"{width:g} s. Give a smaller margin, a longer window or more padding."
                 )
-        return super().placement_range_seconds(window_seconds)
-
-    def reference_time_window_seconds(self, window_seconds : float, network=None):
-        """The generator's, widened for a wrong delay by the farthest its copy is shifted from its partner's arrival."""
-        start, end = super().reference_time_window_seconds(window_seconds, network)
-        reach = self._reach_seconds(self.network if network is None else network)
-        return max(start - reach, 0.0), min(end + reach, float(window_seconds))
+        return low, high
 
     def generate(
         self,
@@ -556,26 +562,24 @@ class HardExampleGenerator(WaveformGenerator):
         """
         Each copy's direction: ``drawn``, or the other where only that keeps
         the copy, ``reach`` from its partner's ``arrival`` (seconds from the
-        window's centre), in the window: its whole signal, ``extent_seconds``
-        before and after it, or its reference time if the generator allows
-        partial signals. Where neither does, the partner's own signal is one
-        the window cannot hold (placement centres it, with a warning), and
-        the drawn direction is kept.
+        window's centre), where the generator places its signals' reference
+        times (``placement_bounds_seconds`` for the signal's
+        ``extent_seconds``, before and after it): its whole signal, the
+        detector margin from the window's edges, as a real signal's reference
+        time is. Where neither does, the partner's own signal is one the
+        window cannot hold (placement centres it, with a warning), and the
+        drawn direction is kept.
         """
-        if self.allow_partially_out_of_window:
-            before = after = 0.0
-        elif extent_seconds is None:
+        if extent_seconds is None and not self.allow_partially_out_of_window:
             raise ValueError(
                 "A WrongDelay hard example keeps its shifted copy's whole signal in the window, so its projection "
                 "needs each signal's extent (its parameters' signal_extent_seconds)."
             )
-        else:
-            extent = np.asarray(extent_seconds, dtype=np.float64)
-            before, after = extent[..., 0], extent[..., 1]
-        half = window_seconds / 2.0
+        low, high, _ = self.placement_bounds_seconds(
+            {SIGNAL_EXTENT: extent_seconds}, window_seconds, int(np.size(arrival)))
 
         def fits(sign):
             copy = arrival + sign * reach
-            return (copy - before >= -half) & (copy + after <= half)
+            return (copy >= low) & (copy <= high)
 
         return np.where(fits(drawn) | ~fits(-drawn), drawn, -drawn)

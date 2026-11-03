@@ -533,6 +533,40 @@ class WaveformGenerator:
         high = window_seconds / 2.0 if high is None else float(high)
         return -low, high
 
+    def placement_bounds_seconds(
+        self, parameters, window_seconds : float, num_examples : int, range_seconds=None,
+    ):
+        """
+        Each example's range of its reference time's offset from the window's
+        centre, (low, high, too_long), each (Batch,): the placement range
+        (``range_seconds``, default ``placement_range_seconds``), and
+        unless the generator allows partial signals, narrowed so that the
+        whole signal (``get_signal_extent_seconds(parameters)``), delayed to
+        any detector by up to the detector margin, lies inside the window. A
+        signal too long for that (``too_long``) is centred: low = high = the
+        offset that centres it, inside the placement range.
+        """
+        range_low, range_high = self.placement_range_seconds(window_seconds) if range_seconds is None \
+            else range_seconds
+        low = np.full(num_examples, float(range_low))
+        high = np.full(num_examples, float(range_high))
+        too_long = np.zeros(num_examples, dtype=bool)
+        if not self.allow_partially_out_of_window:
+            before, after = self.get_signal_extent_seconds(parameters)
+            before = np.broadcast_to(np.asarray(before, dtype=np.float64), (num_examples,))
+            after = np.broadcast_to(np.asarray(after, dtype=np.float64), (num_examples,))
+            margin = self.detector_margin_seconds()
+            fits_low = before + margin - window_seconds / 2.0
+            fits_high = window_seconds / 2.0 - after - margin
+            low = np.maximum(low, fits_low)
+            high = np.minimum(high, fits_high)
+
+            too_long = low > high
+            centre = np.clip(0.5 * (fits_low + fits_high), range_low, range_high)
+            low = np.where(too_long, centre, low)
+            high = np.where(too_long, centre, high)
+        return low, high, too_long
+
     def detector_margin_seconds(self, network=None) -> float:
         """
         The largest delay between the geocentre and a detector of `network`
@@ -1892,8 +1926,7 @@ class InjectionGenerator:
             masks_list.append(mask)
 
             offsets = self._draw_offsets_seconds(
-                generator, params, range_low, range_high,
-                onsource_duration_seconds, num_examples_per_batch,
+                generator, params, onsource_duration_seconds, num_examples_per_batch,
                 generator_streams.stream(f"inject/{label}/shift")
             )
 
@@ -1944,48 +1977,25 @@ class InjectionGenerator:
         self,
         generator,
         parameters,
-        range_low : float,
-        range_high : float,
         window_seconds : float,
         num_examples : int,
         rng : np.random.Generator
     ):
         """
-        Each example's reference-time offset from the window's centre, seconds.
-
-        Uniform over [range_low, range_high]. Unless the generator allows
-        partial signals, each example's range is narrowed so that its signal,
-        from ``before`` seconds ahead of its reference time to ``after``
-        seconds behind it, delayed by up to the largest detector-to-geocentre
-        delay, lies inside the window. A signal too long for that is centred,
-        with a warning.
+        Each example's reference-time offset from the window's centre,
+        seconds: uniform over the generator's placement bounds
+        (``WaveformGenerator.placement_bounds_seconds``). A signal too long
+        for the window is centred, with a warning.
         """
         uniform = rng.random(num_examples)
-        low = np.full(num_examples, float(range_low))
-        high = np.full(num_examples, float(range_high))
-
-        if not getattr(generator, "allow_partially_out_of_window", False):
-            before, after = generator.get_signal_extent_seconds(parameters)
-            before = np.broadcast_to(np.asarray(before, dtype=np.float64), (num_examples,))
-            after = np.broadcast_to(np.asarray(after, dtype=np.float64), (num_examples,))
-            margin = generator.detector_margin_seconds()
-            fits_low = before + margin - window_seconds / 2.0
-            fits_high = window_seconds / 2.0 - after - margin
-            low = np.maximum(low, fits_low)
-            high = np.minimum(high, fits_high)
-
-            too_long = low > high
-            if np.any(too_long):
-                warn(
-                    f"{type(generator).__name__}: {int(np.sum(too_long))} of "
-                    f"{num_examples} signals are longer than the {window_seconds} s "
-                    "window allows; they are centred and extend outside it.",
-                    UserWarning
-                )
-                centre = np.clip(0.5 * (fits_low + fits_high), range_low, range_high)
-                low = np.where(too_long, centre, low)
-                high = np.where(too_long, centre, high)
-
+        low, high, too_long = generator.placement_bounds_seconds(parameters, window_seconds, num_examples)
+        if np.any(too_long):
+            warn(
+                f"{type(generator).__name__}: {int(np.sum(too_long))} of "
+                f"{num_examples} signals are longer than the {window_seconds} s "
+                "window allows; they are centred and extend outside it.",
+                UserWarning
+            )
         return low + (high - low) * uniform
 
     def add_injections_to_onsource(
