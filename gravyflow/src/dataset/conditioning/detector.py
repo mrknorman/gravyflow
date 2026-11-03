@@ -1,6 +1,6 @@
 from pathlib import Path
-from typing import Union, List, Dict, Tuple, Optional
-from dataclasses import dataclass
+from typing import ClassVar, Union, List, Dict, Tuple, Optional
+from dataclasses import dataclass, fields
 from enum import Enum, IntEnum
 from functools import cached_property
 import json
@@ -1086,6 +1086,13 @@ class DetectorSlot:
 
     A slot's ``name`` is its own: none of the bundled detectors' (L1, H1, V1).
     """
+    #: The version of the numerics that turn a slot's parameters into the
+    #: geometry it projects with (``draw`` and ``detector_geometry``), which
+    #: its specification carries: bump it when they change what one draw
+    #: gives, so that a fingerprint changes with the batches. 2: drawn and
+    #: held in float64 (1, unrecorded: rounded to float32).
+    GEOMETRY_NUMERICS : ClassVar[int] = 2
+
     name : str
     noise_curve : IFO
     latitude_radians : Union[float, "gf.Distribution", None] = None
@@ -1144,6 +1151,16 @@ class DetectorSlot:
                     f"{self.name}'s {parameter} can lie only in {ends}{low:g}, {high:g}{')' if open_ else ']'}, "
                     f"but {value!r} reaches {least:g} to {most:g}."
                 )
+
+    def specification(self) -> Dict:
+        """
+        The slot by content (``utils.fingerprint.canonical`` reads it): its
+        fields, and the version of the numerics that turn them into geometry
+        (``GEOMETRY_NUMERICS``), so a fingerprint changes when those numerics
+        do, as a Network's does with its geometry.
+        """
+        return {**{field.name: getattr(self, field.name) for field in fields(self)},
+                "geometry_numerics": self.GEOMETRY_NUMERICS}
 
     @classmethod
     def at(cls, site : "Site", noise_curve : IFO, name : Optional[str] = None) -> "DetectorSlot":

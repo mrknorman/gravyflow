@@ -648,3 +648,22 @@ def test_a_change_of_a_bundled_site_changes_a_varying_datasets_fingerprint(monke
     assert fingerprint() == before
     monkeypatch.setattr(gf.IFO.H1.value, "height_meters", gf.IFO.H1.value.height_meters + 1.0)
     assert fingerprint() != before
+
+
+def test_a_change_of_a_slots_geometry_numerics_changes_its_datasets_fingerprint(monkeypatch):
+    """
+    A slot is fingerprinted by its fields and by the version of the numerics that turn them into the geometry it
+    projects with, so batches that change with those numerics (its geometry drawn and held in float64, not float32)
+    change the fingerprint, and a set materialised before is refused by name, never served. A slot read by its
+    fields alone, as before that change, gives another fingerprint; bundled detectors alone keep theirs.
+    """
+    def fingerprints():
+        return [dataset(ifos).fingerprint for ifos in (
+            gf.Detectors([gf.IFO.H1, gf.IFO.L1, *slots(1), gf.DetectorSlot.at(gf.Site.I1, noise_curve=gf.IFO.L1)]),
+            gf.Detectors([gf.IFO.H1, gf.IFO.L1], num_present=count_between(1, 2)))]
+
+    with_slots, bundled = fingerprints()
+    monkeypatch.delattr(gf.DetectorSlot, "specification")
+    by_fields, bundled_by_fields = fingerprints()
+    assert with_slots != by_fields
+    assert bundled == bundled_by_fields

@@ -485,7 +485,10 @@ repository before it may need the changes below.
   `DETECTOR_GEOMETRY` read it in float32, as a Network's projection does. A site slot's vertex is lal's to 3 mm
   (the rounding of lal's own angles). Batches with slots change by float32 rounding of their geometry (the geometry
   features by about 2e-7, an injection's per-detector SNR by about 1e-6); batches of bundled detectors alone, with or
-  without a drawn count of them, are unchanged, byte for byte.
+  without a drawn count of them, are unchanged, byte for byte. A slot's specification now holds the version of those
+  numerics (`DetectorSlot.GEOMETRY_NUMERICS`, 2), so the fingerprint of every dataset with a slot changes, and a set
+  materialised before is refused by name (`FingerprintMismatch`), never served: materialise it again. A dataset of
+  bundled detectors alone keeps its fingerprint.
 
 - **Detectors that repeat a name are refused.** A detector's noise streams are named for it, so a dataset or noise
   batcher given one detector twice (H1 and H1) served identical noise in both channels, silently; it is refused by
