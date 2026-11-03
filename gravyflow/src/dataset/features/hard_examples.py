@@ -16,7 +16,8 @@ differs from a real one in its violation alone:
 - ``gf.MismatchedWaveforms``: each detector has a waveform of its own, its
   differing draws its own and the rest shared;
 - ``gf.TimeReversed``: the waveform runs backwards in time (for a CBC, a chirp
-  no binary makes).
+  no binary makes; a reversed white-noise burst is another such burst, so for
+  a burst it is no violation).
 
 Each example says what it is: ``ReturnVariables.VIOLATION`` gives each
 generator's ``gf.ViolationCode`` (NONE for a real signal).
@@ -117,11 +118,14 @@ class MismatchedWaveforms:
     named in ``differ`` its own (from the generator's streams under
     ``comp/{j}``) and every other draw shared, so the detectors' waveforms
     differ in those draws alone: a parameter (one of the generator's
-    ``distributed_attributes``, e.g. ``reference_orbital_phase_in`` for chirps
-    alike but for their phase, or the masses for chirps of other lengths) or
-    ``"noise"``, a burst's random content (a WNB's). The presence and the
-    placement are shared. A parameter that differs is labelled NaN, as an
-    IncoherentGenerator's is.
+    ``distributed_attributes``, e.g. the masses, for chirps of other lengths)
+    or ``"noise"``, a burst's random content (a WNB's). One of them at least
+    changes the waveform's shape (the generator's ``shape_attributes``: a
+    binary's masses or spins): waveforms alike but for the amplitude and the
+    phase each detector receives them with are what other skies and
+    polarisations give, so a mismatch in those draws alone is refused. The
+    presence and the placement are shared. A parameter that differs is
+    labelled NaN, as an IncoherentGenerator's is.
 
     ``correlation`` (None, or a float or gf.Distribution in [0, 1), drawn per
     example from ``wave/{g}/violation/correlation``) mixes in the shared
@@ -265,6 +269,14 @@ class HardExampleGenerator(WaveformGenerator):
                 raise ValueError(
                     f"MismatchedWaveforms differs in {unknown}, which {type(generator).__name__} does not draw: "
                     f"name its parameters ({', '.join(generator.distributed_attributes or ())}) or 'noise'."
+                )
+            shape = generator.shape_attributes
+            if shape is not None and not set(violation.differ) & set(shape):
+                raise ValueError(
+                    f"MismatchedWaveforms of a {type(generator).__name__} differs in {list(violation.differ)}, "
+                    "which change only the amplitude and the phase each detector receives one waveform with: other "
+                    "skies and polarisations give that. Differ in at least one draw that changes the waveform's "
+                    f"shape ({', '.join(shape)})."
                 )
         self.generator = generator
         self.violation = violation

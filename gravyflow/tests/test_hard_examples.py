@@ -254,6 +254,23 @@ def test_a_mismatched_correlation_is_finite_and_below_one():
             gf.MismatchedWaveforms("noise", correlation=correlation)
 
 
+def test_a_binarys_mismatch_changes_its_chirps_shape():
+    """
+    A binary's chirps alike but for the amplitude and the phase each detector receives one chirp with are what other
+    skies and polarisations give: a binary's mismatch differs in at least one draw that changes its shape, its masses
+    or spins.
+    """
+    cbc = gf.CBCGenerator(mass_1_msun=uniform(15.0, 40.0), mass_2_msun=uniform(15.0, 40.0),
+                          reference_orbital_phase_in=uniform(0.0, 2.0 * np.pi), inclination_radians=uniform(0.0, 3.0),
+                          distance_mpc=uniform(100.0, 500.0))
+    for differ in (("reference_orbital_phase_in",), ("distance_mpc", "inclination_radians"),
+                   ("ascending_node_longitude",)):
+        with pytest.raises(ValueError, match="shape"):
+            gf.HardExampleGenerator(cbc, gf.MismatchedWaveforms(differ))
+    gf.HardExampleGenerator(cbc, gf.MismatchedWaveforms(("mass_1_msun", "reference_orbital_phase_in")))
+    gf.HardExampleGenerator(cbc, gf.MismatchedWaveforms(("spin_1_in",)))
+
+
 def test_hard_examples_refuse_what_they_cannot_be():
     with pytest.raises(ValueError, match="bounded and above"):
         gf.WrongDelay(gf.Distribution(mean=0.0, std=0.01, type_=gf.DistributionType.NORMAL))

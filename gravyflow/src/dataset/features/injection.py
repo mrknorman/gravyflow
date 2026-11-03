@@ -423,6 +423,11 @@ class WaveformGenerator:
     # A real signal violates nothing; a gf.HardExampleGenerator's violation.
     violation : ClassVar = None
 
+    # The draws that change a waveform's shape, not only the amplitude and the
+    # phase each detector receives it with (a gf.MismatchedWaveforms differs
+    # in one of them): None, every draw and a burst's noise.
+    shape_attributes : ClassVar[Optional[Tuple[str, ...]]] = None
+
     def __post_init__(self):
         if self.name is not None:
             check_name(self.name, "generator name")
@@ -1057,6 +1062,12 @@ class CBCGenerator(WaveformGenerator):
     lambda_2 : Union[float, gf.Distribution] = 0.0
     approximant : Approximant = Approximant.IMRPhenomD
     min_frequency_hertz : Union[float, gf.Distribution] = 20.0
+
+    # A binary's distance, inclination, orbital phase and ascending node change
+    # only the amplitude and the phase each detector receives its chirp with
+    # (exactly for the dominant mode alone; this holds them so for every
+    # approximant), which other skies and polarisations give too.
+    shape_attributes : ClassVar[Tuple[str, ...]] = ("mass_1_msun", "mass_2_msun", "spin_1_in", "spin_2_in")
     
     distributed_attributes : Tuple[str] = (
         "mass_1_msun",
