@@ -13,8 +13,8 @@ differs from a real one in its violation alone:
   from another present detector is that pair's light-travel time plus a margin,
   in the direction that keeps it where the generator's signals arrive where
   only one does;
-- ``gf.OneDetector``: the signal is in exactly one present detector, which then
-  holds the whole network SNR;
+- ``gf.OneDetector``: the signal is in exactly one present detector, which holds
+  what the real signal gives it there;
 - ``gf.MismatchedWaveforms``: each detector has a waveform of its own, its
   differing draws its own and the rest shared;
 - ``gf.TimeReversed``: the waveform runs backwards in time, for a generator
@@ -273,11 +273,14 @@ class OneDetector(Violation):
     present detectors, from ``inject/{g}/violation/detector``). The others
     receive no signal: their DETECTOR_SNR is 0 and their CENTRAL_TIME NaN.
 
-    Under SNR scaling it is scaled to the generator's network SNR target,
-    which the one detector then holds alone. Under HRSS, HPEAK or distance
-    scaling its strain is the source's, so its network SNR is that one
-    detector's, below a real signal's of the same target: a cue a model can
-    read, so scale it to an SNR where it must match real signals.
+    It is scaled as the real signal is, to the generator's target over every
+    present detector (a network SNR, an hrss, an hpeak or a distance), and
+    only then are the other detectors' copies emptied: the one detector holds
+    exactly what the real signal gives it, so its loudness is a real
+    detector's, and the network SNR is what is left, that detector's alone,
+    below the target (the SNR label gives it, measured). A detector louder
+    than any real signal's would put it there would be a cue in one detector
+    alone; the missing detectors' share is the violation itself.
     """
     code : ClassVar[ViolationCode] = ViolationCode.ONE_DETECTOR
 

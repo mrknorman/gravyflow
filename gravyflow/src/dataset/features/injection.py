@@ -2306,8 +2306,6 @@ class InjectionGenerator:
                     projected = ops.where(
                         violation_shifts[..., None] != 0.0,
                         shift_waveform(projected, sample_rate, violation_shifts), projected)
-                if violation_kept is not None:
-                    projected = projected * ops.convert_to_tensor(violation_kept)[..., None]
                 if balance is not None:
                     projected = projected * balance[..., None]
                 start = (ops.shape(projected)[-1] - target_num_samples) // 2
@@ -2376,6 +2374,12 @@ class InjectionGenerator:
                     onsource_duration_seconds=onsource_duration_seconds
                 )
 
+            # A one-detector signal: scaled as the real signal it is, then
+            # every detector's copy but the kept one emptied, so that one holds
+            # what the real signal gives it, and the network SNR is its alone.
+            if violation_kept is not None:
+                projected = projected * ops.convert_to_tensor(violation_kept)[..., None]
+
             # 6. Sum into the noise.
             final_onsource = final_onsource + projected
             scaled_injections_list.append(projected)
@@ -2394,8 +2398,11 @@ class InjectionGenerator:
                 if isinstance(key, WaveformParameters) and value is not None:
                     generator_labels[key] = _at_gain(value, gain, key.value.amplitude_power)
 
+            # The target labels its own scaling type, unless detectors' copies
+            # were emptied after an SNR scaling: then the SNR left is measured.
+            attained = violation_kept is None or type_ is not ScalingTypes.SNR
             for label_type in label_types:
-                if label_type == type_:
+                if label_type == type_ and attained:
                     value = target_val
                 elif label_type == ScalingTypes.HRSS:
                     value = unit_hrss * factor

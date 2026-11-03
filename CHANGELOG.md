@@ -143,9 +143,10 @@ repository before it may need the changes below.
   shifted so that its delay from another present detector, the example's own pair, is their light-travel time plus a
   margin drawn per example, of at least 1 us, so that every wrong delay exceeds light travel after the projection's
   float32 rounding; exact for the drawn pair only, so the margin is a lower bound on the largest violation an example
-  shows, other pairs with the shifted detector exceeding theirs by more or not at all), `gf.OneDetector()` (the signal in exactly one present detector, which holds the whole network SNR
-  target under SNR scaling; under HRSS, HPEAK or distance scaling its network SNR is that one detector's, below a
-  real signal's), `gf.MismatchedWaveforms(differ, correlation=None)` (a waveform of its own in each detector, differing in
+  shows, other pairs with the shifted detector exceeding theirs by more or not at all), `gf.OneDetector()` (the signal in exactly one present detector: scaled as the real signal is, to
+  its target over every present detector, and only then the other detectors' copies emptied, so the one detector
+  holds what the real signal gives it, a real detector's loudness, and the network SNR, which the SNR label
+  measures, is that detector's alone), `gf.MismatchedWaveforms(differ, correlation=None)` (a waveform of its own in each detector, differing in
   the named draws, a parameter or a burst's `"noise"`, with every other draw shared, and correlating by `correlation`,
   finite and below 1, the coherent signal, where given (realised for independent content, a burst's noise; for a
   binary whose masses differ it scatters around it, and each detector's mix is the beat of two chirps, a one-detector

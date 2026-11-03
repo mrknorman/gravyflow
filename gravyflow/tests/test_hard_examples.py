@@ -82,10 +82,12 @@ def test_a_real_signal_is_labelled_none_and_each_hard_example_its_violation():
     expected = [gf.ViolationCode.NONE] + [violation.code for violation in violations]
     np.testing.assert_array_equal(np.asarray(y["VIOLATION"]), np.broadcast_to(np.float32(expected), (BATCH, 5)))
     assert [int(code) for code in expected] == [0, 1, 2, 3, 4]
-    # Every one is scaled to the network SNR target, over the detectors present.
-    np.testing.assert_allclose(np.asarray(y["SNR"]), TARGET_SNR, rtol=SNR_TOLERANCE)
-    each = np.asarray(y["DETECTOR_SNR"], np.float64)
-    np.testing.assert_allclose(np.sqrt(np.sum(each ** 2, axis=-1)), TARGET_SNR, rtol=SNR_TOLERANCE)
+    # Every one is scaled to the network SNR target, over the detectors present; a one-detector signal then
+    # loses every detector's copy but one, and its SNR is that one's.
+    scaled = [g for g, code in enumerate(expected) if code != gf.ViolationCode.ONE_DETECTOR]
+    snr, each = np.asarray(y["SNR"], np.float64), np.asarray(y["DETECTOR_SNR"], np.float64)
+    np.testing.assert_allclose(snr[:, scaled], TARGET_SNR, rtol=SNR_TOLERANCE)
+    np.testing.assert_allclose(np.sqrt(np.sum(each ** 2, axis=-1)), snr, rtol=SNR_TOLERANCE)
 
 
 def test_a_hard_example_draws_as_its_generator_under_its_own_name():
@@ -285,15 +287,26 @@ def test_a_hard_examples_reference_times_fall_where_its_generators_do():
 
 
 @pytest.mark.parametrize("ifos", [(gf.IFO.H1, gf.IFO.L1, gf.IFO.V1), DETECTORS], ids=["fixed", "per example"])
-def test_one_detector_holds_the_whole_network_snr(ifos):
-    x, y = dataset([gf.HardExampleGenerator(wnb(), gf.OneDetector())], ifos=ifos)[0]
+def test_one_detector_holds_what_the_real_signals_detector_does(ifos):
+    """
+    A one-detector signal is the real signal of its name, scaled as it is, with every detector's copy but one
+    emptied: that one holds exactly what the real signal gives that detector, its SNR a real detector's, not the
+    whole network SNR target, and the network SNR (the SNR label) is what is left, that detector's alone.
+    """
+    _, real = dataset([wnb(name="w")], ifos=ifos)[0]
+    x, y = dataset([gf.HardExampleGenerator(wnb(), gf.OneDetector(), name="w")], ifos=ifos)[0]
     present = np.asarray(x["DETECTOR_MASK"]) > 0
     each = np.asarray(y["DETECTOR_SNR"], np.float64)[:, 0]
     holding = each > 0
     assert np.all(np.sum(holding, axis=-1) == 1) and np.all(present[holding])
-    np.testing.assert_allclose(np.max(each, axis=-1), TARGET_SNR, rtol=SNR_TOLERANCE)
+    np.testing.assert_allclose(each[holding], np.asarray(real["DETECTOR_SNR"], np.float64)[:, 0][holding],
+                               rtol=SNR_TOLERANCE)
+    np.testing.assert_allclose(np.asarray(y["SNR"], np.float64)[:, 0], each[holding], rtol=SNR_TOLERANCE)
+    assert np.all(each[holding] < TARGET_SNR)
     injections = np.asarray(y["INJECTIONS"])[:, 0]
     assert np.all(injections[~holding] == 0.0)
+    np.testing.assert_allclose(injections[holding], np.asarray(real["INJECTIONS"])[:, 0][holding],
+                               rtol=SNR_TOLERANCE, atol=SNR_TOLERANCE * np.max(np.abs(injections)))
     times = np.asarray(y["CENTRAL_TIME"])[:, 0]
     assert np.all(np.isfinite(times[holding])) and np.all(np.isnan(times[~holding]))
 
