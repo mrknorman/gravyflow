@@ -39,6 +39,7 @@ from gravyflow.src.dataset.conditioning.detector import C, ExampleNetworks
 from gravyflow.src.dataset.features.injection import (
     SIGNAL_EXTENT, IncoherentGenerator, WaveformGenerator, _common_values, get_support_bounds,
 )
+from gravyflow.src.dataset.tools.snr import _spectrum_for
 from gravyflow.src.rng.consumers import check_name
 from gravyflow.src.rng.tree import BatchStreams
 
@@ -159,6 +160,20 @@ class MismatchedWaveforms:
     so a mismatch in those draws alone is refused. The presence and the
     placement are shared. A parameter that differs is labelled NaN, as an
     IncoherentGenerator's is.
+
+    Every detector carries one source's loudness: as it is projected, each
+    detector's waveform is rescaled so that its noise-weighted polarisation
+    power (<h+, h+> + <hx, hx> in that detector's noise, over the window) is
+    detector 0's waveform's there (``detector_balance``). Differing masses at
+    one distance are of different loudness, so without it the detectors'
+    SNRs would spread wider than any real signal's; with it, each detector's
+    SNR is what a real source with detector 0's waveform gives there, and
+    differs from a real signal's only through the antenna pattern (exactly
+    for a binary's dominant mode, whose polarisations' ratio is its
+    inclination's, shared). Detector 0's waveform is a draw of the same
+    source as any other's, so it stands for the source. For that reason a
+    mismatch is scaled to a network SNR only (gf.ScalingTypes.SNR): an hrss,
+    hpeak or distance of the detectors' different waveforms is refused.
 
     ``correlation`` (None, or a float or gf.Distribution in [0, 1), drawn per
     example from ``wave/{g}/violation/correlation``) mixes in the shared
@@ -346,6 +361,7 @@ class HardExampleGenerator(WaveformGenerator):
             setattr(self, attribute, getattr(generator, attribute))
         self.distributed_attributes = generator.distributed_attributes
         self.network = generator.network
+        self._check_scaling()
 
     def specification(self) -> dict:
         """The hard example by content (``utils.fingerprint.canonical`` reads it): its generator, violation, name and network."""
@@ -490,6 +506,54 @@ class HardExampleGenerator(WaveformGenerator):
         common = _common_values(parameters)
         common[SIGNAL_EXTENT] = np.stack([np.max(before, axis=0), np.max(after, axis=0)], axis=-1)
         return waveforms, common
+
+    def detector_balance(self, polarisations, background, sample_rate_hertz : float,
+                         onsource_duration_seconds : Optional[float] = None):
+        """
+        A mismatched waveform's gain for each detector's copy, (Batch,
+        Detectors), or None for the other violations. Detector j's waveform
+        is rescaled so that its noise-weighted polarisation power,
+        <h+, h+> + <hx, hx> in detector j's noise (``background``, its
+        spectrum estimated as SNR scaling's is) over the onsource window, is
+        what detector 0's waveform has there: every detector then carries one
+        source's intrinsic loudness, and its SNR differs from a real
+        signal's only through what the antenna pattern gives
+        (gf.MismatchedWaveforms). ``polarisations`` is (Batch, Detectors, 2,
+        Time), the window the injection layer crops centred in it. A
+        detector whose waveform is empty gets 0.
+        """
+        if not isinstance(self.violation, MismatchedWaveforms):
+            return None
+        self._check_scaling()
+        polarisations = ops.convert_to_tensor(polarisations, dtype="float32")
+        spectrum = _spectrum_for(background, sample_rate_hertz, None, None, None, None, None)
+
+        def rho(strain):
+            # Each detector's sqrt(<h, h>) in its own noise, over the onsource window.
+            if onsource_duration_seconds is not None:
+                strain = gf.crop_samples(strain, onsource_duration_seconds, sample_rate_hertz)
+            return gf.snr(strain, spectrum, sample_rate_hertz, per_detector=True)
+
+        reference = ops.broadcast_to(polarisations[:, :1], ops.shape(polarisations))
+        wanted = [rho(reference[:, :, p]) for p in (0, 1)]
+        own = [rho(polarisations[:, :, p]) for p in (0, 1)]
+        # Squared relative to the largest, so a waveform of unit amplitude in
+        # physical noise (an SNR near 1e23) cannot overflow float32.
+        largest = ops.max(ops.stack(wanted + own), axis=0)
+        largest = ops.where(largest > 0, largest, 1.0)
+        wanted, own = (sum((value / largest) ** 2 for value in values) for values in (wanted, own))
+        return ops.where(own > 0, ops.sqrt(wanted / ops.where(own > 0, own, 1.0)), 0.0)
+
+    def _check_scaling(self):
+        """A mismatched waveform is scaled to a network SNR: its detectors' waveforms have no one hrss, hpeak or distance."""
+        type_ = getattr(self.scaling_method, "type_", None)
+        if isinstance(self.violation, MismatchedWaveforms) and type_ is not None \
+                and type_ is not gf.ScalingTypes.SNR:
+            raise ValueError(
+                f"A MismatchedWaveforms hard example is scaled to a network SNR, not {type_}: each detector's waveform "
+                "carries one source's noise-weighted loudness, which no one hrss, hpeak or distance of the "
+                "detectors' different waveforms gives. Give its generator a gf.ScalingTypes.SNR scaling."
+            )
 
     def draw_projection(
         self, network, time_delays, streams : BatchStreams, label : str, num_examples : int,

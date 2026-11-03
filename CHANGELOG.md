@@ -149,7 +149,9 @@ repository before it may need the changes below.
   than one value, since other skies and polarisations give waveforms alike but for the amplitude and the phase each
   detector receives them with, and a draw of one value is every detector's: the generators' `shape_attributes`, a
   binary's masses or spins, a burst's frequencies, length or noise, never its amplitude, phase or polarisation
-  eccentricity) and `gf.TimeReversed()` (the waveform reversed about its reference time: a chirp no binary makes, or
+  eccentricity; each detector's waveform rescaled to detector 0's noise-weighted polarisation power in that
+  detector's noise, so that every detector carries one source's loudness and its SNR differs from a real signal's
+  only through the antenna pattern; scaled to a network SNR only) and `gf.TimeReversed()` (the waveform reversed about its reference time: a chirp no binary makes, or
   a ringdown that rises into its peak and stops; taken only by a generator that declares its reversal leaves its
   family, `time_reversal_leaves_family`, `gf.CBCGenerator` and `gf.RingdownGenerator`, and refused by name for a
   sine-Gaussian, white-noise burst, periodic wave or chirplet, whose reversal is one of its own waveforms). It draws as its generator does under its own name, and the

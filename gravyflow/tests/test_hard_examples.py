@@ -274,6 +274,42 @@ def test_mismatched_waveforms_differ_in_the_named_draws_alone():
     assert extent.shape == (BATCH, 2) and np.all(extent <= 0.1 + 1e-9)
 
 
+def test_a_mismatched_binarys_detectors_carry_one_sources_loudness():
+    """
+    Two co-located, co-aligned detectors receive one real signal at one SNR. Each detector's chirp of a mismatched
+    binary (masses of its own) is balanced to one source's noise-weighted loudness, so the two still receive it at
+    one SNR: its SNR in each detector differs from a real signal's only through the antenna pattern, never through
+    its masses' loudness.
+    """
+    twins = [gf.DetectorSlot.at(gf.Site.I1, gf.IFO.H1, name=name) for name in ("A", "B")]
+    binary = dict(mass_1_msun=uniform(15.0, 80.0), mass_2_msun=uniform(15.0, 80.0),
+                  scaling_method=gf.ScalingMethod(constant(TARGET_SNR), gf.ScalingTypes.SNR))
+    spreads = {}
+    for kind, generator in (
+            ("real", gf.CBCGenerator(**binary, name="b")),
+            ("mismatched", gf.HardExampleGenerator(
+                gf.CBCGenerator(**binary), gf.MismatchedWaveforms(("mass_1_msun", "mass_2_msun")), name="b"))):
+        each = np.asarray(dataset([generator], ifos=twins)[0][1]["DETECTOR_SNR"], np.float64)[:, 0]
+        spreads[kind] = np.abs(np.log(each[:, 0] / each[:, 1]))
+    # Each detector's spectrum is estimated from its own 4 s of noise, so even a real signal's two SNRs differ, by
+    # up to about 10 %; a binary's masses alone change its loudness by up to a factor of four here.
+    for spread in spreads.values():
+        assert np.median(spread) < 0.05 and np.max(spread) < 0.15, spreads
+
+
+def test_a_mismatch_is_scaled_to_a_network_snr():
+    for type_ in (gf.ScalingTypes.HRSS, gf.ScalingTypes.HPEAK):
+        with pytest.raises(ValueError, match="network SNR"):
+            gf.HardExampleGenerator(wnb(scaling_method=gf.ScalingMethod(constant(1e-21), type_)),
+                                    gf.MismatchedWaveforms("noise"))
+    distance = gf.ScalingMethod(constant(500.0), gf.WaveformParameters.DISTANCE_MPC)
+    with pytest.raises(ValueError, match="network SNR"):
+        gf.HardExampleGenerator(gf.CBCGenerator(mass_1_msun=uniform(20.0, 40.0), scaling_method=distance),
+                                gf.MismatchedWaveforms("mass_1_msun"))
+    gf.HardExampleGenerator(wnb(scaling_method=gf.ScalingMethod(constant(1e-21), gf.ScalingTypes.HRSS)),
+                            gf.OneDetector())
+
+
 def test_mismatched_waveforms_correlate_as_asked():
     network = gf.Network([gf.IFO.H1, gf.IFO.L1])
     streams = gf.SeedTree(2).batch("train", 0, 0).sub("wave/odd")
