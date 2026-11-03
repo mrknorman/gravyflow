@@ -170,7 +170,8 @@ class MismatchedWaveforms:
     code : ClassVar[ViolationCode] = ViolationCode.MISMATCHED_WAVEFORMS
 
     def __post_init__(self):
-        differ = (self.differ,) if isinstance(self.differ, str) else tuple(self.differ)
+        differ = (self.differ,) if isinstance(self.differ, str) else self.differ
+        differ = tuple(differ) if isinstance(differ, (tuple, list)) else ()
         if not differ or not all(isinstance(name, str) for name in differ):
             raise ValueError(
                 f"MismatchedWaveforms differs in at least one named draw (a parameter, or 'noise'), not {self.differ!r}."

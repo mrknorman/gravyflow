@@ -541,3 +541,9 @@ def test_time_reversal_is_refused_where_it_stays_in_its_generators_family():
     declared = {generator for generator in SHAPES if generator.time_reversal_leaves_family}
     assert declared == {gf.CBCGenerator, gf.RingdownGenerator}
     assert not gf.WaveformGenerator.time_reversal_leaves_family
+
+
+def test_mismatched_waveforms_of_nothing_are_refused_by_name():
+    for differ in (None, (), (1,), ("noise", None)):
+        with pytest.raises(ValueError, match="at least one named draw"):
+            gf.MismatchedWaveforms(differ)
