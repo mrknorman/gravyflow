@@ -164,10 +164,12 @@ repository before it may need the changes below.
   the injection layer reads them from it, and they fingerprint it beside its generator and violation. It draws as its generator does under its own name, and the
   injection layer places, projects, scales over the present detectors, crops and whitens it as the generator's signals,
   so it differs in its violation alone. A wrong delay is placed as its generator's signals exactly, and its copy kept where
-  the generator places its signals' reference times (its whole signal at least the detector margin from the window's
-  edges, as a real signal's is, and inside the padding), by its direction: the drawn one, or the other where only that
-  keeps it there, so a copy sits against the window's edges no more often than a real signal; a window or padding too
-  narrow for that is refused by name when the dataset is built. The violations' own draws have streams of their own
+  the generator's signals arrive in a detector (`HardExampleGenerator.arrival_bounds_seconds`: the placement bounds,
+  which keep the whole signal the detector margin from the window's edges and inside the padding, widened by that
+  margin), by its direction: the drawn one, or the other where only that keeps it there, so a copy reaches no part
+  of the window a real arrival does not (its density near that range's edges is wider than a real arrival's: 0.8 to
+  1.0 % of copies within 10 ms of them, against 0.27 % of real arrivals, for a 0.1 s burst in a 1 s window on H1, L1
+  and V1); a window or padding too narrow for that is refused by name when the dataset is built. The violations' own draws have streams of their own
   (`inject/{g}/violation/{detector,partner,sign,margin}`, `wave/{g}/violation/correlation`, and
   `wave/{g}/comp/{j}/...` for a detector's differing draws): every existing stream draws as before.
   `ReturnVariables.VIOLATION` (B, G) gives each generator's `gf.ViolationCode` (NONE, 0, for a real signal),

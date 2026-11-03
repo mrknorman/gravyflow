@@ -11,7 +11,7 @@ differs from a real one in its violation alone:
 
 - ``gf.WrongDelay``: one present detector's copy is shifted so that its delay
   from another present detector is that pair's light-travel time plus a margin,
-  in the direction that keeps it where the generator places its signals where
+  in the direction that keeps it where the generator's signals arrive where
   only one does;
 - ``gf.OneDetector``: the signal is in exactly one present detector, which then
   holds the whole network SNR;
@@ -169,16 +169,20 @@ class WrongDelay(Violation):
     bound, not the violation every pair sees.
 
     The example is placed as the generator's signals are, exactly, and the
-    copy's reference time is kept where the generator places its signals'
-    reference times (``placement_bounds_seconds``: its whole signal at least
-    the detector margin from the window's edges, unless the generator allows
-    partial signals, and inside the padding), by its direction: the drawn
-    one, or the other where only that keeps it there. So the copy sits
-    against the window's edges no more often than a real signal does. Bounds
-    narrower than twice the farthest shift (the network's longest light
-    travel plus the largest margin), for the generator's longest signal,
-    cannot hold the copy whatever the placement and are refused by name when
-    the dataset is built.
+    copy's reference time is kept where a real signal's reference time
+    arrives in a detector (``arrival_bounds_seconds``: the generator's
+    placement bounds widened by the detector margin, which leaves its whole
+    signal in the window unless the generator allows partial signals), by
+    its direction: the drawn one, or the other where only that keeps it
+    there. So the copy reaches no part of the window a real arrival does not,
+    though its density near the range's edges is not a real arrival's: a
+    real arrival shifted by the reach either way spreads wider, so for a
+    0.1 s burst in a 1 s window on H1, L1 and V1, with margins of 2 to 10 ms,
+    0.8 to 1.0 % of copies lie within 10 ms of the range's edges, against
+    0.27 % of real arrivals. A range narrower than twice the farthest shift (the network's longest
+    light travel plus the largest margin), for the generator's longest
+    signal, cannot hold the copy whatever the placement and is refused by
+    name when the dataset is built.
     """
     margin_seconds : Union[float, "gf.Distribution"]
 
@@ -237,29 +241,29 @@ class WrongDelay(Violation):
     @staticmethod
     def _direction(hard_example, drawn, arrival, reach, extent_seconds, window_seconds : float):
         """
-        Each copy's direction: ``drawn``, or the other where only that keeps
-        the copy, ``reach`` from its partner's ``arrival`` (seconds from the
-        window's centre), where ``hard_example`` places its signals' reference
-        times (``placement_bounds_seconds`` for the signal's
-        ``extent_seconds``, before and after it): its whole signal, the
-        detector margin from the window's edges, as a real signal's reference
-        time is. Where neither does, the partner's own signal is one the
-        window cannot hold (placement centres it, with a warning), and the
-        drawn direction is kept.
+        Each copy's direction: ``drawn``, unless the other puts the copy,
+        ``reach`` from its partner's ``arrival`` (seconds from the window's
+        centre), nearer where ``hard_example``'s real signals arrive in a
+        detector (``arrival_bounds_seconds`` for the signal's
+        ``extent_seconds``, before and after it). The partner's own arrival
+        is a real one, so one direction at least keeps the copy there when the
+        range is twice the reach wide (the refusal of ``placement_range_seconds``),
+        and where neither does, the copy lies outside it by no more than its
+        partner, which placement's rounding to a sample can put there.
         """
         if extent_seconds is None and not hard_example.allow_partially_out_of_window:
             raise ValueError(
-                "A WrongDelay hard example keeps its shifted copy's whole signal in the window, so its projection "
-                "needs each signal's extent (its parameters' signal_extent_seconds)."
+                "A WrongDelay hard example keeps its shifted copy where real signals arrive, its whole signal in "
+                "the window, so its projection needs each signal's extent (its parameters' signal_extent_seconds)."
             )
-        low, high, _ = hard_example.placement_bounds_seconds(
+        low, high = hard_example.arrival_bounds_seconds(
             {SIGNAL_EXTENT: extent_seconds}, window_seconds, int(np.size(arrival)))
 
-        def fits(sign):
+        def outside(sign):
             copy = arrival + sign * reach
-            return (copy >= low) & (copy <= high)
+            return np.maximum(low - copy, 0.0) + np.maximum(copy - high, 0.0)
 
-        return np.where(fits(drawn) | ~fits(-drawn), drawn, -drawn)
+        return np.where(outside(drawn) <= outside(-drawn), drawn, -drawn)
 
 
 @dataclass(frozen=True)
@@ -567,7 +571,7 @@ class HardExampleGenerator(WaveformGenerator):
     the SNR target over the present detectors, the window and whitening are
     the injection layer's, as for the generator, so a hard example sits in the
     window as a real signal does (a wrong delay keeps its shifted copy where
-    its generator places signals by the copy's direction, gf.WrongDelay).
+    its generator's signals arrive by the copy's direction, gf.WrongDelay).
 
     The violation acts through its own hooks (``Violation``), which this calls
     in every case. One that moves signal between detectors (all but
@@ -651,32 +655,48 @@ class HardExampleGenerator(WaveformGenerator):
         """The generator's: a reversed chirp keeps its length, run backwards."""
         return self.generator.in_band_duration_seconds(parameters, lower_frequency_hertz)
 
+    def arrival_bounds_seconds(self, parameters, window_seconds : float, num_examples : int, range_seconds=None):
+        """
+        Where each example's real reference time can arrive in a detector, as
+        an offset from the window's centre, (low, high), each (Batch,): its
+        placement bounds (``placement_bounds_seconds``) widened by the
+        detector margin, the farthest a detector's arrival lies from the
+        placed one. Unless the generator allows partial signals, the whole
+        signal arriving there lies in the window, as the placement narrowed
+        its bounds for exactly that.
+        """
+        low, high, _ = self.placement_bounds_seconds(parameters, window_seconds, num_examples, range_seconds)
+        margin = self.detector_margin_seconds()
+        return low - margin, high + margin
+
     def placement_range_seconds(self, window_seconds : float):
         """
         The generator's. A violation that shifts a copy (``reach_seconds``, a
         wrong delay's) refuses a window that cannot hold its shifted copy
-        whatever the placement: its copy is kept where the generator places
-        its signals' reference times (gf.WrongDelay), so those bounds must be
-        twice the farthest shift wide for any signal of the generator, its
-        longest put either side of its reference time.
+        whatever the placement: its copy is kept where real signals arrive
+        (``arrival_bounds_seconds``, gf.WrongDelay), and its partner's arrival
+        can lie anywhere there, so that range must be twice the farthest shift
+        wide for any signal of the generator, its longest put either side of
+        its reference time.
         """
         low, high = super().placement_range_seconds(window_seconds)
         reach = self.violation.reach_seconds(self.network)
         if reach > 0.0:
             signal = float(self.generator.get_max_generated_duration())
             extents = {SIGNAL_EXTENT: np.array([[signal, 0.0], [0.0, signal]])}
-            narrowest, widest, too_long = self.placement_bounds_seconds(
-                extents, window_seconds, 2, range_seconds=(low, high))
-            width = 0.0 if np.any(too_long) else float(np.min(widest - narrowest))
+            _, _, too_long = self.placement_bounds_seconds(extents, window_seconds, 2, range_seconds=(low, high))
+            earliest, latest = self.arrival_bounds_seconds(extents, window_seconds, 2, range_seconds=(low, high))
+            width = 0.0 if np.any(too_long) else float(np.min(latest - earliest))
             if 2.0 * reach > width:
                 held = "its reference time" if self.allow_partially_out_of_window else \
-                    f"its signal (up to {signal:g} s long) and the detector margin"
+                    f"its signal (up to {signal:g} s long)"
                 raise ValueError(
                     f"A {type(self.violation).__name__} hard example shifts its copy up to {reach:g} s from its "
                     f"partner's arrival (the network's longest light travel plus the largest margin), either way, "
-                    f"and keeps it where its generator places reference times, which leaves {held} in the window: "
-                    f"that needs a placement {2.0 * reach:g} s wide, but the {window_seconds:g} s window and the "
-                    f"padding give {width:g} s. Give a smaller margin, a longer window or more padding."
+                    f"and keeps it where real signals arrive, which leaves {held} in the window: that needs a "
+                    f"range {2.0 * reach:g} s wide, but the {window_seconds:g} s window and the padding, widened "
+                    f"by the detector margin, give {width:g} s. Give a smaller margin, a longer window or more "
+                    "padding."
                 )
         return low, high
 

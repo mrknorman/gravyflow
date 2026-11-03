@@ -191,10 +191,10 @@ def test_a_wrong_delay_is_placed_as_its_generators_signals():
                          ids=["whole window", "padded"])
 def test_a_wrong_delays_copy_is_kept_where_its_generator_places_signals(padding, margin):
     """
-    The copy is shifted in the drawn direction, or the other where only that keeps it where the generator places its
-    signals' reference times: its whole extent at least the detector margin from the window's edges, as a real
-    signal's reference time is, and inside the padding; with margins that leave little room, every copy lies there,
-    and holds its share of the SNR.
+    The copy is shifted in the drawn direction, or the other where only that keeps it where the generator's signals
+    arrive in a detector: its placement bounds (its whole extent at least the detector margin from the window's
+    edges, and inside the padding) widened by the detector margin; with margins that leave little room, every copy
+    lies there, and holds its share of the SNR.
     """
     padded = {} if padding is None else dict(front_padding_duration_seconds=padding,
                                              back_padding_duration_seconds=padding)
@@ -202,7 +202,8 @@ def test_a_wrong_delays_copy_is_kept_where_its_generator_places_signals(padding,
     ds, real = dataset([generator]), dataset([wnb(**padded, name="far")])
     detector_margin = gf.Network([gf.IFO.H1, gf.IFO.L1, gf.IFO.V1]).max_geocentre_delay_seconds()
     # The window is 1 s; the burst extends 0.05 s either side of its reference time; placement rounds to a sample.
-    low, high = (0.05 + detector_margin, 0.95 - detector_margin) if padding is None else (0.5 - padding, 0.5 + padding)
+    low, high = (0.05, 0.95) if padding is None else \
+        (0.5 - padding - detector_margin, 0.5 + padding + detector_margin)
     for k in range(4):
         _, y = ds[k]
         times = np.asarray(y["CENTRAL_TIME"], np.float64)[:, 0]
@@ -213,20 +214,63 @@ def test_a_wrong_delays_copy_is_kept_where_its_generator_places_signals(padding,
         np.testing.assert_array_less(0.0, np.asarray(y["DETECTOR_SNR"])[:, 0])
 
 
+@pytest.mark.parametrize("margin, padding", [(0.002, None), (0.01, None), (0.002, 0.1)],
+                         ids=["short reach", "longer reach", "padded"])
+def test_a_wrong_delays_copy_falls_where_real_arrivals_do(margin, padding):
+    """
+    A copy's reference time is kept where a real signal's arrival in a detector falls: the generator's placement
+    bounds widened by the detector margin, which keeps its whole signal in the window. So it reaches the margin's
+    band beyond the bounds as real arrivals do, and a reach shorter than the detector margin, which the bounds alone
+    cannot hold shifted either way from an arrival in that band, never leaves it.
+    """
+    num_examples, window = 50000, 1.0
+    network = gf.Network([gf.IFO.H1, gf.IFO.L1, gf.IFO.V1])
+    padded = {} if padding is None else dict(front_padding_duration_seconds=padding,
+                                             back_padding_duration_seconds=padding)
+    hard = gf.HardExampleGenerator(wnb(network=network, **padded), gf.WrongDelay(margin))
+    hard.placement_range_seconds(window)
+    rng = np.random.default_rng(1)
+    # The burst extends 0.05 s either side of its reference time.
+    extent = np.tile([0.05, 0.05], (num_examples, 1))
+    low, high, _ = hard.placement_bounds_seconds({SIGNAL_EXTENT: extent}, window, num_examples)
+    offsets = low + (high - low) * rng.random(num_examples)
+    delays = np.asarray(network.get_time_delay(
+        np.float32(2.0 * np.pi * rng.random(num_examples)),
+        np.float32(np.arcsin(2.0 * rng.random(num_examples) - 1.0))), np.float64)
+    shifts, _, carriers = hard.draw_projection(
+        network, delays, gf.SeedTree(5).batch("train", 0, 0), "hard", num_examples,
+        offsets_seconds=offsets, extent_seconds=extent, window_seconds=window)
+    real = (offsets[:, None] + delays).ravel()
+    copies = np.sum((offsets[:, None] + delays + shifts) * carriers, axis=-1)
+    margin_seconds = hard.detector_margin_seconds()
+    reach_low, reach_high = low[0] - margin_seconds, high[0] + margin_seconds
+    assert reach_low <= real.min() and real.max() <= reach_high
+    # Float32 delays: the copy lies its partner's float32 arrival plus a float64 shift.
+    resolution = 1.0e-6
+    assert np.all(copies >= reach_low - resolution) and np.all(copies <= reach_high + resolution), \
+        (np.min(copies) - reach_low, reach_high - np.max(copies))
+    assert np.any(copies < low[0]) and np.any(copies > high[0])
+
+
 def test_a_window_that_cannot_hold_a_wrong_delays_copy_is_refused():
     """
-    A margin whose copy, shifted either way from its partner, could leave where its generator places signals is
+    A margin whose copy, shifted either way from its partner, could leave where its generator's signals arrive is
     refused by name when the dataset is built: twice the longest shift (the network's longest light travel plus the
-    largest margin) must fit the placement bounds of the generator's longest signal (the window less that signal
-    and the detector margin either side, inside the padding; the padding alone if it allows partial signals).
+    largest margin) must fit the arrival bounds of the generator's longest signal (its placement bounds, the window
+    less that signal and the detector margin either side, inside the padding, or the padding alone if it allows
+    partial signals, widened by the detector margin). With H1, L1 and V1 (light travel up to 27 ms, a detector
+    margin of 21 ms) and a 0.1 s burst in a 1 s window, that is 0.9 s, 0.24 s with 0.1 s of padding and 1.04 s
+    for partial signals.
     """
     padded = dict(front_padding_duration_seconds=0.1, back_padding_duration_seconds=0.1)
-    for margin, settings in ((2.0, {}), (uniform(0.3, 0.5), {}), (0.45, {}), (0.41, {}), (0.08, padded),
+    for margin, settings in ((2.0, {}), (uniform(0.3, 0.5), {}), (0.45, {}), (0.43, {}), (0.1, padded),
                              (uniform(0.3, 0.5), dict(allow_partially_out_of_window=True))):
         with pytest.raises(ValueError, match="WrongDelay hard example shifts its copy"):
             dataset([gf.HardExampleGenerator(wnb(**settings), gf.WrongDelay(margin))])
+    dataset([gf.HardExampleGenerator(wnb(), gf.WrongDelay(0.41))])
     dataset([gf.HardExampleGenerator(wnb(allow_partially_out_of_window=True), gf.WrongDelay(0.45))])
-    dataset([gf.HardExampleGenerator(wnb(**padded), gf.WrongDelay(0.04))])
+    # A partner's arrival can lie the detector margin beyond the padding, and its copy too.
+    dataset([gf.HardExampleGenerator(wnb(**padded), gf.WrongDelay(0.08))])
 
 
 def test_a_hard_examples_reference_times_fall_where_its_generators_do():
