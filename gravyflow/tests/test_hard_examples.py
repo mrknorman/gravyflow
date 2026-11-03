@@ -165,7 +165,7 @@ def test_a_wrong_delay_exceeds_its_pairs_light_travel_time_by_its_margin(ifos):
 def test_a_wrong_delays_placement_allows_for_its_shifted_copy():
     network = gf.Network([gf.IFO.H1, gf.IFO.L1, gf.IFO.V1])
     base = wnb(network=network)
-    hard = gf.HardExampleGenerator(wnb(network=network), gf.WrongDelay(uniform(0.0, 0.03)))
+    hard = gf.HardExampleGenerator(wnb(network=network), gf.WrongDelay(uniform(0.001, 0.03)))
     assert hard.detector_margin_seconds() == pytest.approx(
         base.detector_margin_seconds() + network.max_arrival_time_difference_seconds + 0.03)
     for violation in (gf.OneDetector(), gf.TimeReversed(), gf.MismatchedWaveforms("noise")):
@@ -219,8 +219,6 @@ def test_mismatched_waveforms_correlate_as_asked():
             wnb(network=network), gf.MismatchedWaveforms("noise", correlation=correlation), name="odd")
         return np.asarray(generator.generate(64, SAMPLE_RATE, 2.0, streams)[0], np.float64)
 
-    coherent = generated(1.0)
-    np.testing.assert_allclose(coherent[:, 0], coherent[:, 1], rtol=0, atol=1e-6 * np.abs(coherent).max())
     half = generated(0.5)
     rho = np.sum(half[:, 0] * half[:, 1]) / np.sqrt(np.sum(half[:, 0] ** 2) * np.sum(half[:, 1] ** 2))
     # Statistical: 64 bursts x 2 polarisations of about 0.1 s x 160 Hz, so ~2000 degrees of freedom.
@@ -237,13 +235,28 @@ def test_a_hard_examples_fingerprint_is_its_generator_and_violation():
         canonical(gf.HardExampleGenerator(wnb(), gf.TimeReversed()))
 
 
+def test_a_wrong_delays_margin_lies_above_the_delays_resolution():
+    """
+    A margin that can be zero, or below what float32 delays resolve, gives delays a real source makes: refused,
+    so every wrong delay exceeds its pair's light travel.
+    """
+    from gravyflow.src.dataset.features.hard_examples import MIN_MARGIN_SECONDS
+    for margin in (0.0, uniform(0.0, 0.03), -0.01, 0.5 * MIN_MARGIN_SECONDS):
+        with pytest.raises(ValueError, match="bounded and above"):
+            gf.WrongDelay(margin)
+    gf.WrongDelay(uniform(2.0 * MIN_MARGIN_SECONDS, 0.03))
+
+
+def test_a_mismatched_correlation_is_finite_and_below_one():
+    """A NaN correlation is refused by name, never served as a batch of NaN; rho = 1, the coherent signal, is a real one."""
+    for correlation in (1.5, 1.0, uniform(0.5, 1.0), float("nan"), constant(float("nan")), uniform(0.0, float("nan"))):
+        with pytest.raises(ValueError, match="correlation lies in"):
+            gf.MismatchedWaveforms("noise", correlation=correlation)
+
+
 def test_hard_examples_refuse_what_they_cannot_be():
-    with pytest.raises(ValueError, match="bounded and not negative"):
+    with pytest.raises(ValueError, match="bounded and above"):
         gf.WrongDelay(gf.Distribution(mean=0.0, std=0.01, type_=gf.DistributionType.NORMAL))
-    with pytest.raises(ValueError, match="bounded and not negative"):
-        gf.WrongDelay(-0.01)
-    with pytest.raises(ValueError, match="correlation lies in"):
-        gf.MismatchedWaveforms("noise", correlation=1.5)
     with pytest.raises(ValueError, match="does not draw"):
         gf.HardExampleGenerator(wnb(), gf.MismatchedWaveforms("mass_1_msun"))
     with pytest.raises(TypeError, match="wraps a coherent"):

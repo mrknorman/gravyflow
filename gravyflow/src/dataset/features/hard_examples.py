@@ -39,6 +39,12 @@ from gravyflow.src.rng.consumers import check_name
 from gravyflow.src.rng.tree import BatchStreams
 
 
+#: The least a wrong delay's margin may be, in seconds. The projection's delays
+#: are float32, within about 0.1 us of the float64 light travel a margin is
+#: added to, so a smaller margin may leave a delay a real source makes.
+MIN_MARGIN_SECONDS = 1.0e-6
+
+
 class ViolationCode(IntEnum):
     """What each example's signal is, as ``ReturnVariables.VIOLATION`` labels it."""
     NONE = 0
@@ -62,8 +68,9 @@ class WrongDelay:
     """
     One present detector's copy shifted so that its delay from another present
     detector is the pair's light-travel time plus ``margin_seconds`` (a float
-    or a gf.Distribution, drawn per example; its support finite and not
-    negative), in either direction.
+    or a gf.Distribution, drawn per example; its support finite and at least
+    ``MIN_MARGIN_SECONDS``, so every wrong delay exceeds its pair's light
+    travel), in either direction.
 
     The detector, its partner (each uniform among the example's present
     detectors), the direction (either, equally) and the margin are drawn from
@@ -78,10 +85,11 @@ class WrongDelay:
     def __post_init__(self):
         margin = _distribution(self.margin_seconds, "WrongDelay's margin_seconds")
         low, high = get_support_bounds(margin, "WrongDelay's margin_seconds")
-        if not (np.isfinite(low) and np.isfinite(high)) or low < 0.0:
+        if not (np.isfinite(low) and np.isfinite(high) and low >= MIN_MARGIN_SECONDS):
             raise ValueError(
-                f"WrongDelay's margin_seconds must be bounded and not negative, so that every shifted copy "
-                f"stays in the window; {margin!r} reaches {low:g} to {high:g} s."
+                f"WrongDelay's margin_seconds must be bounded and above {MIN_MARGIN_SECONDS:g} s (what the "
+                f"projection's float32 delays resolve), so that every wrong delay exceeds its pair's light travel; "
+                f"{margin!r} reaches {low:g} to {high:g} s."
             )
         object.__setattr__(self, "margin_seconds", margin)
 
@@ -115,13 +123,14 @@ class MismatchedWaveforms:
     placement are shared. A parameter that differs is labelled NaN, as an
     IncoherentGenerator's is.
 
-    ``correlation`` (None, or a float or gf.Distribution in [0, 1], drawn per
+    ``correlation`` (None, or a float or gf.Distribution in [0, 1), drawn per
     example from ``wave/{g}/violation/correlation``) mixes in the shared
     waveform, the one drawn with nothing differing: detector j's is
     sqrt(rho) h_shared + sqrt(1 - rho) h_j, so any two detectors' waveforms
     correlate by rho. For a burst whose content differs it is a burst of the
-    same parameters (Gaussian content of the same power); rho = 1 is the
-    coherent signal. None is rho = 0, the waveforms' own.
+    same parameters (Gaussian content of the same power). rho = 1 would be the
+    coherent signal, a real one, so it is refused; None is rho = 0, the
+    waveforms' own.
     """
     differ : Tuple[str, ...]
     correlation : Union[None, float, "gf.Distribution"] = None
@@ -138,9 +147,10 @@ class MismatchedWaveforms:
         if self.correlation is not None:
             correlation = _distribution(self.correlation, "MismatchedWaveforms' correlation")
             low, high = get_support_bounds(correlation, "MismatchedWaveforms' correlation")
-            if low < 0.0 or high > 1.0:
+            if not (np.isfinite(low) and np.isfinite(high) and 0.0 <= low and high < 1.0):
                 raise ValueError(
-                    f"MismatchedWaveforms' correlation lies in [0, 1]; {correlation!r} reaches {low:g} to {high:g}."
+                    f"MismatchedWaveforms' correlation lies in [0, 1) (1 is the coherent signal, a real one); "
+                    f"{correlation!r} reaches {low:g} to {high:g}."
                 )
             object.__setattr__(self, "correlation", correlation)
 
