@@ -550,6 +550,12 @@ def test_mismatched_waveforms_of_nothing_are_refused_by_name():
             gf.MismatchedWaveforms(differ)
 
 
+def test_an_incoherent_generators_violation_is_refused():
+    """A different waveform in each detector is no real signal: its violation is refused by name, never labelled NONE."""
+    with pytest.raises(ValueError, match="IncoherentGenerator"):
+        dataset([gf.IncoherentGenerator([wnb(), wnb(), wnb()])])[0]
+
+
 @pytest.mark.parametrize("ifos", [(gf.IFO.H1, gf.IFO.L1, gf.IFO.V1), DETECTORS], ids=["fixed", "per example"])
 def test_violation_detectors_name_each_copy_that_carries_the_violation(ifos):
     """
@@ -581,4 +587,3 @@ def test_violation_detectors_name_each_copy_that_carries_the_violation(ifos):
     injected = ~np.isnan(np.asarray(y["VIOLATION"])[:, 5])
     assert 0 < np.sum(injected) < BATCH
     assert np.all(np.isnan(carriers[~injected, 5])) and np.all(carriers[injected, 5] == 0.0)
-

@@ -358,7 +358,9 @@ class ReturnVariables(Enum):
 
     # What each generator's signal is: its gf.ViolationCode, NONE (0) for a
     # real signal and the violation's code for a hard example
-    # (gf.HardExampleGenerator), so evaluation can score each kind.
+    # (gf.HardExampleGenerator), so evaluation can score each kind. Refused
+    # with an IncoherentGenerator, whose detectors' waveforms differ though it
+    # names no violation.
     VIOLATION = ReturnVariable(28, (BATCH, GENERATOR))
 
     # Which detectors' copies carry that violation: 1 in each, 0 in the
@@ -1426,6 +1428,11 @@ class IncoherentGenerator(WaveformGenerator):
     value per example for each parameter: the components' common value, NaN
     where they differ or a component does not draw it (an injection whose
     detectors hold bursts of different durations has no one duration).
+
+    It is no real signal, but no hard example either: whether its components
+    differ, and in what, is not checked, so ReturnVariables.VIOLATION and
+    VIOLATION_DETECTORS are refused by name with it. A labelled mismatch is
+    gf.HardExampleGenerator with gf.MismatchedWaveforms.
     """
     component_generators : List[WaveformGenerator]
 
@@ -2230,6 +2237,12 @@ class InjectionGenerator:
             # What the signal is, and which detectors' copies carry it.
             asked = [variable for variable in VIOLATION_LABELS
                      if parameters_to_return and variable in parameters_to_return]
+            if asked and isinstance(generator, IncoherentGenerator):
+                raise ValueError(
+                    f"An IncoherentGenerator gives each detector a waveform of its own, which no real signal "
+                    f"does, but it is no hard example whose violation is known: {', '.join(v.name for v in asked)} "
+                    "cannot label it. Use gf.HardExampleGenerator with gf.MismatchedWaveforms, or leave it out."
+                )
             if ReturnVariables.VIOLATION in asked:
                 code = 0 if generator.violation is None else int(generator.violation.code)
                 generator_labels[ReturnVariables.VIOLATION] = np.full((num_inj,), code, dtype=np.float32)

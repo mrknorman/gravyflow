@@ -163,7 +163,8 @@ repository before it may need the changes below.
   `ReturnVariables.VIOLATION_DETECTORS` (B, G, IFO) which detectors' copies carry it (1, else 0: none for a real
   signal, the shifted detector of a wrong delay, the one detector holding a one-detector signal, every present
   detector for a mismatched or reversed waveform, never an absent detector), both float32 and NaN where the generator
-  injected nothing (its `injection_chance`), and `CENTRAL_TIME` each copy's arrival (NaN where one detector holds the
+  injected nothing (its `injection_chance`), and both refused by name with a `gf.IncoherentGenerator`, whose
+  detectors' waveforms differ though it names no violation (a labelled mismatch is `gf.MismatchedWaveforms`); and `CENTRAL_TIME` each copy's arrival (NaN where one detector holds the
   signal and another none). A violation that
   needs two detectors present refuses a network or `num_present` that can give fewer.
 
