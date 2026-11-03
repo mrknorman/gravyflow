@@ -130,11 +130,11 @@ class MismatchedWaveforms:
     ``distributed_attributes``, e.g. the masses, for chirps of other lengths)
     or ``"noise"``, a burst's random content (a WNB's). One of them at least
     changes the waveform's shape (the generator's ``shape_attributes``: a
-    binary's masses or spins): waveforms alike but for the amplitude and the
-    phase each detector receives them with are what other skies and
-    polarisations give, so a mismatch in those draws alone is refused. The
-    presence and the placement are shared. A parameter that differs is
-    labelled NaN, as an IncoherentGenerator's is.
+    binary's masses or spins, a burst's frequencies, length or noise):
+    waveforms alike but for the amplitude and the phase each detector receives
+    them with are what other skies and polarisations give, so a mismatch in
+    those draws alone is refused. The presence and the placement are shared.
+    A parameter that differs is labelled NaN, as an IncoherentGenerator's is.
 
     ``correlation`` (None, or a float or gf.Distribution in [0, 1), drawn per
     example from ``wave/{g}/violation/correlation``) mixes in the shared
@@ -276,13 +276,14 @@ class HardExampleGenerator(WaveformGenerator):
                     f"MismatchedWaveforms differs in {unknown}, which {type(generator).__name__} does not draw: "
                     f"name its parameters ({', '.join(generator.distributed_attributes or ())}) or 'noise'."
                 )
-            shape = generator.shape_attributes
-            if shape is not None and not set(violation.differ) & set(shape):
+            shape = [draw for draw in violation.differ if draw in generator.shape_attributes]
+            if not shape:
                 raise ValueError(
-                    f"MismatchedWaveforms of a {type(generator).__name__} differs in {list(violation.differ)}, "
-                    "which change only the amplitude and the phase each detector receives one waveform with: other "
-                    "skies and polarisations give that. Differ in at least one draw that changes the waveform's "
-                    f"shape ({', '.join(shape)})."
+                    f"MismatchedWaveforms of a {type(generator).__name__} differs in {list(violation.differ)}, none "
+                    "of them a draw that changes the waveform's shape "
+                    f"({', '.join(generator.shape_attributes) or 'it names none'}): waveforms alike but for the "
+                    "amplitude and the phase each detector receives them with are what other skies and "
+                    "polarisations give. Differ in at least one of those."
                 )
         self.generator = generator
         self.violation = violation

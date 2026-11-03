@@ -315,6 +315,100 @@ def test_a_binarys_mismatch_changes_its_chirps_shape():
     gf.HardExampleGenerator(cbc, gf.MismatchedWaveforms(("spin_1_in",)))
 
 
+def test_a_bursts_mismatch_changes_its_shape():
+    """
+    A burst's amplitude, phase and polarisation eccentricity change only the amplitude and the phase each detector
+    receives one burst with, as other skies and polarisations do: a mismatch in them alone is refused.
+    """
+    drawn = {"amplitude": uniform(0.5, 2.0), "phase_radians": uniform(0.0, np.pi),
+             "polarization_eccentricity": uniform(0.0, 1.0)}
+    for generator, shape in (
+            (gf.SineGaussianGenerator, {"frequency_hertz": uniform(80.0, 120.0)}),
+            (gf.ChirpletGenerator, {"duration_seconds": uniform(0.2, 0.5)}),
+            (gf.RingdownGenerator, {"damping_time_seconds": uniform(0.01, 0.05)}),
+            (gf.PeriodicWaveGenerator, {"frequency_hertz": uniform(80.0, 120.0)})):
+        own = {name: value for name, value in drawn.items() if name in generator.distributed_attributes}
+        burst = generator(**own, **shape)
+        for name in (*own, tuple(own)):
+            with pytest.raises(ValueError, match="none of them a draw that changes"):
+                gf.HardExampleGenerator(burst, gf.MismatchedWaveforms(name))
+        gf.HardExampleGenerator(burst, gf.MismatchedWaveforms((*shape, *own)))
+    with pytest.raises(ValueError, match="none of them a draw that changes"):
+        gf.HardExampleGenerator(
+            wnb(polarization_eccentricity=uniform(0.0, 1.0)), gf.MismatchedWaveforms("polarization_eccentricity"))
+
+
+#: Each generator's draws: a base value of every one, then the draws that change its waveform's shape and those that
+#: change only the amplitude and the phase each detector receives it with (each at another value), then those kept out
+#: of the shape untested (a binary's that it refuses to vary, that its default approximant ignores, or that end its
+#: chirp in band). The base eccentricity is elliptical, so the polarisations span both quadratures.
+SHAPES = {
+    gf.SineGaussianGenerator: (
+        dict(frequency_hertz=100.0, quality_factor=10.0, amplitude=1.0, phase_radians=0.0, polarization_eccentricity=0.5),
+        dict(frequency_hertz=120.0, quality_factor=5.0),
+        dict(amplitude=1.7, phase_radians=0.9, polarization_eccentricity=0.2), ()),
+    gf.ChirpletGenerator: (
+        dict(start_frequency_hertz=50.0, end_frequency_hertz=150.0, duration_seconds=0.3, amplitude=1.0,
+             phase_radians=0.0, polarization_eccentricity=0.5),
+        dict(start_frequency_hertz=70.0, end_frequency_hertz=200.0, duration_seconds=0.5),
+        dict(amplitude=1.7, phase_radians=0.9, polarization_eccentricity=0.2), ()),
+    gf.RingdownGenerator: (
+        dict(frequency_hertz=150.0, damping_time_seconds=0.02, amplitude=1.0, phase_radians=0.0,
+             polarization_eccentricity=0.5),
+        dict(frequency_hertz=180.0, damping_time_seconds=0.05),
+        dict(amplitude=1.7, phase_radians=0.9, polarization_eccentricity=0.2), ()),
+    gf.PeriodicWaveGenerator: (
+        dict(frequency_hertz=100.0, duration_seconds=0.5, amplitude=1.0, phase_radians=0.0),
+        dict(frequency_hertz=120.0, duration_seconds=0.3),
+        dict(amplitude=1.7, phase_radians=0.9), ()),
+    gf.WNBGenerator: (
+        dict(duration_seconds=0.2, min_frequency_hertz=40.0, max_frequency_hertz=200.0, polarization_eccentricity=0.5),
+        dict(duration_seconds=0.3, min_frequency_hertz=60.0, max_frequency_hertz=150.0, noise=None),
+        dict(polarization_eccentricity=0.2), ()),
+    gf.CBCGenerator: (
+        dict(mass_1_msun=30.0, mass_2_msun=25.0, inclination_radians=1.0, distance_mpc=100.0,
+             reference_orbital_phase_in=0.0, ascending_node_longitude=0.0),
+        dict(mass_1_msun=35.0, mass_2_msun=20.0, spin_1_in=(0.0, 0.0, 0.6), spin_2_in=(0.0, 0.0, -0.6)),
+        dict(inclination_radians=2.0, distance_mpc=300.0, reference_orbital_phase_in=0.9),
+        ("ascending_node_longitude", "eccentricity", "mean_periastron_anomaly", "lambda_1", "lambda_2",
+         "min_frequency_hertz")),
+}
+
+
+def _outside_span(waveforms, basis):
+    """The largest share of a polarisation of ``waveforms`` (2, Time) outside the span of ``basis``'s and their quadratures."""
+    from scipy.signal import hilbert
+    vectors = np.concatenate([basis, np.imag(hilbert(basis, axis=-1))]).T
+    shares = []
+    for polarisation in waveforms:
+        fit, *_ = np.linalg.lstsq(vectors, polarisation, rcond=None)
+        shares.append(np.linalg.norm(polarisation - vectors @ fit) / np.linalg.norm(polarisation))
+    return max(shares)
+
+
+@pytest.mark.parametrize("generator", SHAPES, ids=lambda generator: generator.__name__)
+def test_a_generators_shape_attributes_change_its_shape_and_no_other_draw_does(generator):
+    """
+    A generator's ``shape_attributes`` change its waveform beyond the span of the base waveform's polarisations and
+    their quadratures, what other skies and polarisations give a detector; its other draws keep the waveform in it.
+    """
+    base, shape, other, untested = SHAPES[generator]
+    assert set(generator.shape_attributes) == set(shape)
+    assert set(shape) | set(other) | set(untested) == set(generator.distributed_attributes) | (set(shape) & {"noise"})
+
+    def waveforms(seed=2, **changed):
+        streams = gf.SeedTree(seed).batch("train", 0, 0).sub("wave/shape")
+        made, _ = generator(**{**base, **changed}).generate(1, SAMPLE_RATE, 2.0, streams)
+        return np.asarray(made, np.float64)[0]
+
+    reference = waveforms()
+    for name, value in shape.items():
+        changed = waveforms(seed=3) if name == "noise" else waveforms(**{name: value})
+        assert _outside_span(changed, reference) > 0.1, name
+    for name, value in other.items():
+        assert _outside_span(waveforms(**{name: value}), reference) < 1e-3, name
+
+
 def test_hard_examples_refuse_what_they_cannot_be():
     with pytest.raises(ValueError, match="bounded and above"):
         gf.WrongDelay(gf.Distribution(mean=0.0, std=0.01, type_=gf.DistributionType.NORMAL))

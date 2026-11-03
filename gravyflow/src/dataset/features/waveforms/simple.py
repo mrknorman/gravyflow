@@ -29,7 +29,7 @@ Conventions, shared by every generator here:
 """
 
 from dataclasses import dataclass
-from typing import Optional, Union, Tuple
+from typing import ClassVar, Optional, Union, Tuple
 from enum import Enum, auto
 
 import jax.numpy as jnp
@@ -153,6 +153,11 @@ class PeriodicWaveGenerator(gf.WaveformGenerator):
     phase_radians: Union[float, gf.Distribution] = 0.0
     duration_seconds: Union[float, gf.Distribution] = 0.5
 
+    # The amplitude and, for a sine, the phase change only the amplitude and
+    # the phase each detector receives one wave with; the phase is kept out of
+    # the shape for every wave shape.
+    shape_attributes: ClassVar[Tuple[str, ...]] = ("frequency_hertz", "duration_seconds")
+
     distributed_attributes: Tuple[str] = (
         "frequency_hertz",
         "amplitude",
@@ -261,6 +266,10 @@ class SineGaussianGenerator(gf.WaveformGenerator):
     amplitude: Union[float, gf.Distribution] = 1.0
     phase_radians: Union[float, gf.Distribution] = 0.0
     polarization_eccentricity: Union[float, gf.Distribution] = 1.0
+
+    # The amplitude, the phase and the eccentricity change only the amplitude
+    # and the phase each detector receives one wavelet with.
+    shape_attributes: ClassVar[Tuple[str, ...]] = ("frequency_hertz", "quality_factor")
 
     distributed_attributes: Tuple[str] = (
         "frequency_hertz",
@@ -378,6 +387,11 @@ class ChirpletGenerator(gf.WaveformGenerator):
     phase_radians: Union[float, gf.Distribution] = 0.0
     polarization_eccentricity: Union[float, gf.Distribution] = 1.0
 
+    # The amplitude, the phase and the eccentricity change only the amplitude
+    # and the phase each detector receives one chirplet with.
+    shape_attributes: ClassVar[Tuple[str, ...]] = (
+        "start_frequency_hertz", "end_frequency_hertz", "duration_seconds")
+
     distributed_attributes: Tuple[str] = (
         "start_frequency_hertz",
         "end_frequency_hertz",
@@ -488,6 +502,10 @@ class RingdownGenerator(gf.WaveformGenerator):
     amplitude: Union[float, gf.Distribution] = 1.0
     phase_radians: Union[float, gf.Distribution] = 0.0
     polarization_eccentricity: Union[float, gf.Distribution] = 1.0
+
+    # The amplitude, the phase and the eccentricity change only the amplitude
+    # and the phase each detector receives one ringdown with.
+    shape_attributes: ClassVar[Tuple[str, ...]] = ("frequency_hertz", "damping_time_seconds")
 
     distributed_attributes: Tuple[str] = (
         "frequency_hertz",

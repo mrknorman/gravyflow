@@ -424,9 +424,10 @@ class WaveformGenerator:
     violation : ClassVar = None
 
     # The draws that change a waveform's shape, not only the amplitude and the
-    # phase each detector receives it with (a gf.MismatchedWaveforms differs
-    # in one of them): None, every draw and a burst's noise.
-    shape_attributes : ClassVar[Optional[Tuple[str, ...]]] = None
+    # phase each detector receives it with, as other skies and polarisations
+    # do (a gf.MismatchedWaveforms differs in one of them): named by each
+    # generator, so one that names none cannot be mismatched.
+    shape_attributes : ClassVar[Tuple[str, ...]] = ()
 
     def __post_init__(self):
         if self.name is not None:
@@ -896,6 +897,11 @@ class WNBGenerator(WaveformGenerator):
     max_frequency_hertz: Union[float, gf.Distribution] = 1024.0
     polarization_eccentricity: Union[float, gf.Distribution] = 0.0
     min_time_bandwidth : float = WNB_MIN_TIME_BANDWIDTH
+
+    # The eccentricity only scales the two polarisations, which each detector
+    # receives in a combination of its own.
+    shape_attributes : ClassVar[Tuple[str, ...]] = (
+        "duration_seconds", "min_frequency_hertz", "max_frequency_hertz", "noise")
 
     distributed_attributes : Tuple[str] = (
         "duration_seconds",

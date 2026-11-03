@@ -145,10 +145,11 @@ repository before it may need the changes below.
   float32 rounding), `gf.OneDetector()` (the signal in exactly one present detector, which holds the whole network SNR
   target), `gf.MismatchedWaveforms(differ, correlation=None)` (a waveform of its own in each detector, differing in
   the named draws, a parameter or a burst's `"noise"`, with every other draw shared, and correlating by `correlation`,
-  finite and below 1, the coherent signal, where given; one draw at least changes the waveform's shape, a binary's
-  masses or spins, since other skies and polarisations give chirps alike but for the amplitude and the phase each
-  detector receives them with: the generators' `shape_attributes`) and `gf.TimeReversed()` (the waveform reversed
-  about its reference time: a chirp no binary makes, though a reversed white-noise burst is another such burst). It
+  finite and below 1, the coherent signal, where given; one draw at least changes the waveform's shape, since other
+  skies and polarisations give waveforms alike but for the amplitude and the phase each detector receives them with:
+  the generators' `shape_attributes`, a binary's masses or spins, a burst's frequencies, length or noise, never its
+  amplitude, phase or polarisation eccentricity) and `gf.TimeReversed()` (the waveform reversed about its reference
+  time: a chirp no binary makes, though a reversed white-noise burst is another such burst). It
   draws as its generator does under its own name, and the injection layer places, projects, scales over the present
   detectors, crops and whitens it as the generator's signals, so it differs in its violation alone. A wrong delay is
   placed as its generator's signals exactly, and its copy kept in the window, its whole signal, by its direction: the
