@@ -3,6 +3,8 @@ Hard examples (gf.HardExampleGenerator): each violation is what it claims, and
 the examples are the generator's in everything else.
 """
 
+import dataclasses
+
 import numpy as np
 import pytest
 
@@ -524,7 +526,7 @@ def test_hard_examples_refuse_what_they_cannot_be():
         gf.HardExampleGenerator(wnb(), gf.MismatchedWaveforms("mass_1_msun"))
     with pytest.raises(TypeError, match="wraps a coherent"):
         gf.HardExampleGenerator(gf.HardExampleGenerator(wnb(), gf.OneDetector()), gf.OneDetector())
-    with pytest.raises(TypeError, match="violation is one of"):
+    with pytest.raises(TypeError, match="violation is a gf.Violation"):
         gf.HardExampleGenerator(wnb(), "late")
     for violation in (gf.WrongDelay(0.01), gf.OneDetector(), gf.MismatchedWaveforms("noise")):
         with pytest.raises(ValueError, match="needs two detectors present"):
@@ -665,3 +667,24 @@ def test_violation_detectors_name_each_copy_that_carries_the_violation(ifos):
     injected = ~np.isnan(np.asarray(y["VIOLATION"])[:, 5])
     assert 0 < np.sum(injected) < BATCH
     assert np.all(np.isnan(carriers[~injected, 5])) and np.all(carriers[injected, 5] == 0.0)
+
+
+def test_a_violation_acts_through_its_own_hooks():
+    """
+    What a violation does is its own: a one-detector signal that keeps the first present detector, by its own
+    projection alone, is held there, with nothing in the hard example naming it.
+    """
+    @dataclasses.dataclass(frozen=True)
+    class FirstDetector(gf.OneDetector):
+        def projection(self, hard_example, network, time_delays, present, stream, num_examples, *placement):
+            kept = np.zeros(present.shape, dtype=np.float32)
+            kept[np.arange(num_examples), np.argmax(present > 0, axis=1)] = 1.0
+            return None, kept, kept
+
+    x, y = dataset([gf.HardExampleGenerator(wnb(), FirstDetector())], ifos=DETECTORS,
+                   outputs=[RV.VIOLATION_DETECTORS])[0]
+    present = np.asarray(x["DETECTOR_MASK"]) > 0
+    first = np.zeros(present.shape, dtype=np.float32)
+    first[np.arange(BATCH), np.argmax(present, axis=1)] = 1.0
+    np.testing.assert_array_equal(np.asarray(y["VIOLATION_DETECTORS"])[:, 0], first)
+    np.testing.assert_array_equal(np.asarray(y["DETECTOR_SNR"])[:, 0] > 0, first > 0)

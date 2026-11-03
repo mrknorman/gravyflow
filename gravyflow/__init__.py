@@ -139,6 +139,7 @@ _MODULES = {
     "MismatchedWaveforms": "gravyflow.src.dataset.features.hard_examples",
     "TimeReversed": "gravyflow.src.dataset.features.hard_examples",
     "ViolationCode": "gravyflow.src.dataset.features.hard_examples",
+    "Violation": "gravyflow.src.dataset.features.hard_examples",
     "WaveformParameter": "gravyflow.src.dataset.features.injection",
     "WaveformParameters": "gravyflow.src.dataset.features.injection",
     "ScalingMethod": "gravyflow.src.dataset.features.injection",

@@ -24,6 +24,9 @@ differs from a real one in its violation alone:
 
 Each example says what it is: ``ReturnVariables.VIOLATION`` gives each
 generator's ``gf.ViolationCode`` (NONE for a real signal).
+
+Each violation is one class, a ``Violation``: what it checks, draws and changes
+are its own hooks, which the hard example calls in every case.
 """
 
 from copy import copy
@@ -86,7 +89,63 @@ def _draws_one_value(generator : WaveformGenerator, draw : str) -> bool:
 
 
 @dataclass(frozen=True)
-class WrongDelay:
+class Violation:
+    """
+    Base of the violations a gf.HardExampleGenerator gives its generator's
+    signals. A violation is a frozen dataclass of its parameters with its
+    ``code``, and it acts only through the hooks below, each of which changes
+    nothing by default: the hard example calls every hook and holds no case of
+    its own, so a new violation is one class.
+    """
+    code : ClassVar[ViolationCode]
+
+    #: Whether it moves signal between detectors, so that every example needs
+    #: two present.
+    needs_two_detectors : ClassVar[bool] = True
+
+    def check(self, generator : WaveformGenerator) -> None:
+        """Refuse by name a generator whose signals it cannot violate, when the hard example is built."""
+
+    def check_scaling(self, scaling_method) -> None:
+        """Refuse by name a scaling it cannot be given, when the hard example is built and as it is scaled."""
+
+    def reach_seconds(self, network) -> float:
+        """
+        The farthest it moves a detector's copy in time from its partner's
+        arrival, either way, on ``network``: 0.0, none.
+        """
+        return 0.0
+
+    def generate(self, generator : WaveformGenerator, network, num_waveforms : int, sample_rate_hertz : float,
+                 duration_seconds : float, streams : BatchStreams):
+        """
+        The polarisations, (Batch, 2, Time) or (Batch, Detectors, 2, Time),
+        and their parameters with the signal's extent (``SIGNAL_EXTENT``),
+        drawn from ``generator`` (every example injected) on ``network``:
+        the generator's own.
+        """
+        waveforms, parameters = generator.generate(num_waveforms, sample_rate_hertz, duration_seconds, streams)
+        parameters[SIGNAL_EXTENT] = np.stack(_extent(generator, parameters, num_waveforms), axis=-1)
+        return waveforms, parameters
+
+    def detector_balance(self, polarisations, background, sample_rate_hertz : float,
+                         onsource_duration_seconds : Optional[float]):
+        """Each detector's gain on its copy as it is projected, (Batch, Detectors), or None: none."""
+        return None
+
+    def projection(self, hard_example, network, time_delays, present : np.ndarray, stream, num_examples : int,
+                   offsets_seconds, extent_seconds, window_seconds : Optional[float]):
+        """
+        Its change to the projection, (shifts, kept, carriers), each (Batch,
+        Detectors) (see HardExampleGenerator.draw_projection), from the
+        violation's streams (``stream(name)``): no shift, every detector kept,
+        and every present detector's copy a carrier.
+        """
+        return None, None, (present > 0).astype(np.float32)
+
+
+@dataclass(frozen=True)
+class WrongDelay(Violation):
     """
     One present detector's copy shifted so that its delay from another present
     detector is the pair's light-travel time plus ``margin_seconds`` (a float
@@ -104,10 +163,10 @@ class WrongDelay:
     each other present detector is what it is: it may exceed that pair's
     light travel by more than the margin (by more than the largest margin in
     about a quarter of examples, for margins of 2 to 20 ms on networks of two
-    to four detectors drawn on the sphere), or lie within it. So the margin is a lower bound on the largest violation an
-    example shows, and a margin drawn smaller (a harder example, as a
-    curriculum would draw it) sets that bound, not the violation every pair
-    sees.
+    to four detectors drawn on the sphere), or lie within it. So the margin is
+    a lower bound on the largest violation an example shows, and a margin
+    drawn smaller (a harder example, as a curriculum would draw it) sets that
+    bound, not the violation every pair sees.
 
     The example is placed as the generator's signals are, exactly, and the
     copy's reference time is kept where the generator places its signals'
@@ -140,9 +199,71 @@ class WrongDelay:
     def max_margin_seconds(self) -> float:
         return float(get_support_bounds(self.margin_seconds, "WrongDelay's margin_seconds")[1])
 
+    def reach_seconds(self, network) -> float:
+        """``network``'s longest light travel plus the largest margin: 0.0 without a network."""
+        if network is None:
+            return 0.0
+        return float(network.max_arrival_time_difference_seconds) + self.max_margin_seconds
+
+    def projection(self, hard_example, network, time_delays, present, stream, num_examples,
+                   offsets_seconds, extent_seconds, window_seconds):
+        """One present detector's copy shifted from its partner's arrival, by its direction (see the class)."""
+        num_detectors = present.shape[-1]
+        rows = np.arange(num_examples)
+        detector = _choose(present, stream("detector"))
+        partners = present.copy()
+        partners[rows, detector] = 0.0
+        partner = _choose(partners, stream("partner"))
+        drawn = np.where(stream("sign").random(num_examples) < 0.5, -1.0, 1.0)
+        margin = np.asarray(self.margin_seconds.sample(num_examples, stream("margin")), dtype=np.float64)
+        location = np.broadcast_to(np.asarray(network.location, dtype=np.float64), (num_examples, num_detectors, 3))
+        light_seconds = np.linalg.norm(location[rows, detector] - location[rows, partner], axis=-1) / C
+        delays = np.asarray(time_delays, dtype=np.float64)
+        reach = light_seconds + margin
+        if offsets_seconds is None or window_seconds is None:
+            raise ValueError(
+                "A WrongDelay hard example keeps its shifted copy in the window, so its projection needs each "
+                "example's placement (the injection parameter 'shift') and the window's length."
+            )
+        arrival = np.asarray(offsets_seconds, dtype=np.float64) + delays[rows, partner]
+        sign = self._direction(hard_example, drawn, arrival, reach, extent_seconds, float(window_seconds))
+        shifts = np.zeros((num_examples, num_detectors))
+        # The copy's delay from its partner becomes sign x (light travel + margin).
+        shifts[rows, detector] = sign * reach - (delays[rows, detector] - delays[rows, partner])
+        carriers = np.zeros((num_examples, num_detectors), dtype=np.float32)
+        carriers[rows, detector] = 1.0
+        return shifts, None, carriers
+
+    @staticmethod
+    def _direction(hard_example, drawn, arrival, reach, extent_seconds, window_seconds : float):
+        """
+        Each copy's direction: ``drawn``, or the other where only that keeps
+        the copy, ``reach`` from its partner's ``arrival`` (seconds from the
+        window's centre), where ``hard_example`` places its signals' reference
+        times (``placement_bounds_seconds`` for the signal's
+        ``extent_seconds``, before and after it): its whole signal, the
+        detector margin from the window's edges, as a real signal's reference
+        time is. Where neither does, the partner's own signal is one the
+        window cannot hold (placement centres it, with a warning), and the
+        drawn direction is kept.
+        """
+        if extent_seconds is None and not hard_example.allow_partially_out_of_window:
+            raise ValueError(
+                "A WrongDelay hard example keeps its shifted copy's whole signal in the window, so its projection "
+                "needs each signal's extent (its parameters' signal_extent_seconds)."
+            )
+        low, high, _ = hard_example.placement_bounds_seconds(
+            {SIGNAL_EXTENT: extent_seconds}, window_seconds, int(np.size(arrival)))
+
+        def fits(sign):
+            copy = arrival + sign * reach
+            return (copy >= low) & (copy <= high)
+
+        return np.where(fits(drawn) | ~fits(-drawn), drawn, -drawn)
+
 
 @dataclass(frozen=True)
-class OneDetector:
+class OneDetector(Violation):
     """
     The signal in exactly one present detector (uniform among the example's
     present detectors, from ``inject/{g}/violation/detector``). The others
@@ -156,9 +277,16 @@ class OneDetector:
     """
     code : ClassVar[ViolationCode] = ViolationCode.ONE_DETECTOR
 
+    def projection(self, hard_example, network, time_delays, present, stream, num_examples,
+                   offsets_seconds, extent_seconds, window_seconds):
+        """Every detector's copy emptied but one, which carries the violation."""
+        kept = np.zeros(present.shape, dtype=np.float32)
+        kept[np.arange(num_examples), _choose(present, stream("detector"))] = 1.0
+        return None, kept, kept
+
 
 @dataclass(frozen=True)
-class MismatchedWaveforms:
+class MismatchedWaveforms(Violation):
     """
     A waveform of its own in each detector: what differs, and how much, is
     controlled. Each detector's waveform is the generator's, with the draws
@@ -229,9 +357,103 @@ class MismatchedWaveforms:
                 )
             object.__setattr__(self, "correlation", correlation)
 
+    def check(self, generator):
+        known = set(generator.distributed_attributes or ()) | {"noise"}
+        unknown = [draw for draw in self.differ if draw not in known]
+        if unknown:
+            raise ValueError(
+                f"MismatchedWaveforms differs in {unknown}, which {type(generator).__name__} does not draw: "
+                f"name its parameters ({', '.join(generator.distributed_attributes or ())}) or 'noise'."
+            )
+        shape = [draw for draw in self.differ if draw in generator.shape_attributes]
+        if not shape:
+            raise ValueError(
+                f"MismatchedWaveforms of a {type(generator).__name__} differs in {list(self.differ)}, none "
+                "of them a draw that changes the waveform's shape "
+                f"({', '.join(generator.shape_attributes) or 'it names none'}): waveforms alike but for the "
+                "amplitude and the phase each detector receives them with are what other skies and "
+                "polarisations give. Differ in at least one of those."
+            )
+        if all(_draws_one_value(generator, draw) for draw in shape):
+            raise ValueError(
+                f"MismatchedWaveforms of a {type(generator).__name__} differs in {list(self.differ)}, but "
+                f"each of its draws that changes the shape ({', '.join(shape)}) has one value only, so every "
+                "detector would receive one waveform: a real signal. Give one of them a distribution of more "
+                "than one value."
+            )
+
+    def check_scaling(self, scaling_method):
+        """A network SNR only: its detectors' waveforms have no one hrss, hpeak or distance."""
+        type_ = getattr(scaling_method, "type_", None)
+        if type_ is not None and type_ is not gf.ScalingTypes.SNR:
+            raise ValueError(
+                f"A MismatchedWaveforms hard example is scaled to a network SNR, not {type_}: each detector's waveform "
+                "carries one source's noise-weighted loudness, which no one hrss, hpeak or distance of the "
+                "detectors' different waveforms gives. Give its generator a gf.ScalingTypes.SNR scaling."
+            )
+
+    def generate(self, generator, network, num_waveforms, sample_rate_hertz, duration_seconds, streams):
+        """Detector j's waveform from the streams that differ under ``comp/{j}`` (see the class)."""
+        if network is None:
+            raise ValueError("MismatchedWaveforms gives each detector its own waveform: give the generator a network.")
+        waveforms, parameters, before, after = [], [], [], []
+        for j in range(_num_detectors(network)):
+            routed = _MismatchedStreams(streams, self.differ, j)
+            component_waveforms, component_parameters = generator.generate(
+                num_waveforms, sample_rate_hertz, duration_seconds, routed)
+            unused = [draw for draw in self.differ if draw not in routed.routed]
+            if unused:
+                raise ValueError(
+                    f"MismatchedWaveforms differs in {unused}, which {type(generator).__name__} drew "
+                    "nothing from: its waveforms would not differ there."
+                )
+            waveforms.append(jnp.asarray(component_waveforms))
+            parameters.append(component_parameters)
+            extent = _extent(generator, component_parameters, num_waveforms)
+            before.append(extent[0])
+            after.append(extent[1])
+        waveforms = jnp.stack(waveforms, axis=1)
+        if self.correlation is not None:
+            rho = np.asarray(
+                self.correlation.sample(num_waveforms, streams.stream("violation/correlation")), dtype=np.float32)
+            shared, _ = generator.generate(num_waveforms, sample_rate_hertz, duration_seconds, streams)
+            rho = jnp.asarray(rho).reshape((-1, 1, 1, 1))
+            waveforms = jnp.sqrt(rho) * jnp.asarray(shared)[:, None] + jnp.sqrt(1.0 - rho) * waveforms
+        common = _common_values(parameters)
+        common[SIGNAL_EXTENT] = np.stack([np.max(before, axis=0), np.max(after, axis=0)], axis=-1)
+        return waveforms, common
+
+    def detector_balance(self, polarisations, background, sample_rate_hertz, onsource_duration_seconds):
+        """
+        Detector j's waveform rescaled so that its noise-weighted polarisation
+        power, <h+, h+> + <hx, hx> in detector j's noise (``background``, its
+        spectrum estimated as SNR scaling's is) over the onsource window, is
+        what detector 0's waveform has there: every detector then carries one
+        source's intrinsic loudness (see the class). A detector whose waveform
+        is empty gets 0.
+        """
+        polarisations = ops.convert_to_tensor(polarisations, dtype="float32")
+        spectrum = _spectrum_for(background, sample_rate_hertz, None, None, None, None, None)
+
+        def rho(strain):
+            # Each detector's sqrt(<h, h>) in its own noise, over the onsource window.
+            if onsource_duration_seconds is not None:
+                strain = gf.crop_samples(strain, onsource_duration_seconds, sample_rate_hertz)
+            return gf.snr(strain, spectrum, sample_rate_hertz, per_detector=True)
+
+        reference = ops.broadcast_to(polarisations[:, :1], ops.shape(polarisations))
+        wanted = [rho(reference[:, :, p]) for p in (0, 1)]
+        own = [rho(polarisations[:, :, p]) for p in (0, 1)]
+        # Squared relative to the largest, so a waveform of unit amplitude in
+        # physical noise (an SNR near 1e23) cannot overflow float32.
+        largest = ops.max(ops.stack(wanted + own), axis=0)
+        largest = ops.where(largest > 0, largest, 1.0)
+        wanted, own = (sum((value / largest) ** 2 for value in values) for values in (wanted, own))
+        return ops.where(own > 0, ops.sqrt(wanted / ops.where(own > 0, own, 1.0)), 0.0)
+
 
 @dataclass(frozen=True)
-class TimeReversed:
+class TimeReversed(Violation):
     """
     The waveform reversed in time about its reference time (a CBC's merger, a
     ringdown's peak) before it is projected, so the reference time is placed
@@ -248,11 +470,25 @@ class TimeReversed:
     """
     code : ClassVar[ViolationCode] = ViolationCode.TIME_REVERSED
 
+    needs_two_detectors : ClassVar[bool] = False
 
-VIOLATIONS = (WrongDelay, OneDetector, MismatchedWaveforms, TimeReversed)
+    def check(self, generator):
+        if not generator.time_reversal_leaves_family:
+            raise ValueError(
+                f"A {type(generator).__name__}'s waveform reversed in time is one its generator makes (a "
+                "sine-Gaussian is the same wavelet, a white-noise burst another such burst, a periodic wave a "
+                "periodic wave, a chirplet one from its end to its start), so it is no violation: TimeReversed takes "
+                "a generator whose reversal leaves its family (time_reversal_leaves_family: a CBCGenerator, a "
+                "RingdownGenerator)."
+            )
 
-#: The violations that need two detectors present in every example.
-_PAIRED = (WrongDelay, OneDetector, MismatchedWaveforms)
+    def generate(self, generator, network, num_waveforms, sample_rate_hertz, duration_seconds, streams):
+        """The generator's waveforms reversed, and their extent with them."""
+        waveforms, parameters = super().generate(
+            generator, network, num_waveforms, sample_rate_hertz, duration_seconds, streams)
+        before, after = np.moveaxis(parameters[SIGNAL_EXTENT], -1, 0)
+        parameters[SIGNAL_EXTENT] = np.stack([after, before], axis=-1)
+        return _reflect(waveforms), parameters
 
 
 class _MismatchedStreams(BatchStreams):
@@ -284,6 +520,16 @@ class _MismatchedStreams(BatchStreams):
 
     def sub(self, prefix : str):
         raise TypeError("A mismatched waveform's generator draws from its own streams, never a sub-tree of them.")
+
+
+def _extent(generator : WaveformGenerator, parameters, num_waveforms : int):
+    """``generator``'s signal extent for its ``parameters``, (before, after), each (Batch,) float64."""
+    return tuple(np.broadcast_to(np.asarray(side, dtype=np.float64), (num_waveforms,))
+                 for side in generator.get_signal_extent_seconds(parameters))
+
+
+def _num_detectors(network) -> int:
+    return int(np.asarray(network.num_detectors).ravel()[0])
 
 
 def _reflect(waveforms):
@@ -323,58 +569,29 @@ class HardExampleGenerator(WaveformGenerator):
     window as a real signal does (a wrong delay keeps its shifted copy where
     its generator places signals by the copy's direction, gf.WrongDelay).
 
-    The violations that move signal between detectors (all but TimeReversed)
-    need two detectors present in every example: a network or a num_present
-    that can give fewer is refused by name. TimeReversed takes only a
-    generator whose reversal leaves its family (gf.TimeReversed).
+    The violation acts through its own hooks (``Violation``), which this calls
+    in every case. One that moves signal between detectors (all but
+    TimeReversed, ``needs_two_detectors``) needs two detectors present in
+    every example: a network or a num_present that can give fewer is refused
+    by name. TimeReversed takes only a generator whose reversal leaves its
+    family (gf.TimeReversed).
 
     ``ReturnVariables.VIOLATION`` gives each example's ``violation.code``.
     """
 
-    def __init__(self, generator : WaveformGenerator, violation, name : Optional[str] = None):
+    def __init__(self, generator : WaveformGenerator, violation : Violation, name : Optional[str] = None):
         if not isinstance(generator, WaveformGenerator) or isinstance(
                 generator, (IncoherentGenerator, HardExampleGenerator)):
             raise TypeError(
                 f"A HardExampleGenerator wraps a coherent waveform generator (a CBCGenerator, a WNBGenerator...), "
                 f"not {generator!r}."
             )
-        if not isinstance(violation, VIOLATIONS):
+        if not isinstance(violation, Violation):
             raise TypeError(
-                f"A HardExampleGenerator's violation is one of {', '.join(v.__name__ for v in VIOLATIONS)}, "
-                f"not {violation!r}."
+                f"A HardExampleGenerator's violation is a gf.Violation "
+                f"({', '.join(v.__name__ for v in Violation.__subclasses__())}), not {violation!r}."
             )
-        if isinstance(violation, TimeReversed) and not generator.time_reversal_leaves_family:
-            raise ValueError(
-                f"A {type(generator).__name__}'s waveform reversed in time is one its generator makes (a "
-                "sine-Gaussian is the same wavelet, a white-noise burst another such burst, a periodic wave a "
-                "periodic wave, a chirplet one from its end to its start), so it is no violation: TimeReversed takes "
-                "a generator whose reversal leaves its family (time_reversal_leaves_family: a CBCGenerator, a "
-                "RingdownGenerator)."
-            )
-        if isinstance(violation, MismatchedWaveforms):
-            known = set(generator.distributed_attributes or ()) | {"noise"}
-            unknown = [draw for draw in violation.differ if draw not in known]
-            if unknown:
-                raise ValueError(
-                    f"MismatchedWaveforms differs in {unknown}, which {type(generator).__name__} does not draw: "
-                    f"name its parameters ({', '.join(generator.distributed_attributes or ())}) or 'noise'."
-                )
-            shape = [draw for draw in violation.differ if draw in generator.shape_attributes]
-            if not shape:
-                raise ValueError(
-                    f"MismatchedWaveforms of a {type(generator).__name__} differs in {list(violation.differ)}, none "
-                    "of them a draw that changes the waveform's shape "
-                    f"({', '.join(generator.shape_attributes) or 'it names none'}): waveforms alike but for the "
-                    "amplitude and the phase each detector receives them with are what other skies and "
-                    "polarisations give. Differ in at least one of those."
-                )
-            if all(_draws_one_value(generator, draw) for draw in shape):
-                raise ValueError(
-                    f"MismatchedWaveforms of a {type(generator).__name__} differs in {list(violation.differ)}, but "
-                    f"each of its draws that changes the shape ({', '.join(shape)}) has one value only, so every "
-                    "detector would receive one waveform: a real signal. Give one of them a distribution of more "
-                    "than one value."
-                )
+        violation.check(generator)
         self.generator = generator
         self.violation = violation
         self.name = None if name is None else check_name(name, "generator name")
@@ -386,7 +603,7 @@ class HardExampleGenerator(WaveformGenerator):
             setattr(self, attribute, getattr(generator, attribute))
         self.distributed_attributes = generator.distributed_attributes
         self.network = generator.network
-        self._check_scaling()
+        violation.check_scaling(self.scaling_method)
 
     def specification(self) -> dict:
         """
@@ -404,7 +621,7 @@ class HardExampleGenerator(WaveformGenerator):
     def network(self, network):
         # Checked on every assignment, a dataset's binding included.
         network = self.init_network(network, self.geometry_stream())
-        if network is not None and isinstance(self.violation, _PAIRED):
+        if network is not None and self.violation.needs_two_detectors:
             fewest = self._fewest_present(network)
             if fewest < 2:
                 raise ValueError(
@@ -420,11 +637,7 @@ class HardExampleGenerator(WaveformGenerator):
             if network.num_present is None:
                 return network.num_detectors
             return int(np.ceil(get_support_bounds(network.num_present, "num_present")[0]))
-        return int(np.asarray(network.num_detectors).ravel()[0])
-
-    @staticmethod
-    def _num_detectors(network) -> int:
-        return int(np.asarray(network.num_detectors).ravel()[0])
+        return _num_detectors(network)
 
     def get_max_generated_duration(self):
         return self.generator.get_max_generated_duration()
@@ -438,26 +651,17 @@ class HardExampleGenerator(WaveformGenerator):
         """The generator's: a reversed chirp keeps its length, run backwards."""
         return self.generator.in_band_duration_seconds(parameters, lower_frequency_hertz)
 
-    def _reach_seconds(self, network) -> float:
-        """
-        The farthest a copy is shifted from its partner's arrival, either way:
-        for a wrong delay, ``network``'s longest light travel plus the largest
-        margin; 0.0 for the other violations, or without a network.
-        """
-        if network is None or not isinstance(self.violation, WrongDelay):
-            return 0.0
-        return float(network.max_arrival_time_difference_seconds) + self.violation.max_margin_seconds
-
     def placement_range_seconds(self, window_seconds : float):
         """
-        The generator's. A wrong delay refuses a window that cannot hold its
-        shifted copy whatever the placement: its copy is kept where the
-        generator places its signals' reference times (gf.WrongDelay), so
-        those bounds must be twice the farthest shift wide for any signal of
-        the generator, its longest put either side of its reference time.
+        The generator's. A violation that shifts a copy (``reach_seconds``, a
+        wrong delay's) refuses a window that cannot hold its shifted copy
+        whatever the placement: its copy is kept where the generator places
+        its signals' reference times (gf.WrongDelay), so those bounds must be
+        twice the farthest shift wide for any signal of the generator, its
+        longest put either side of its reference time.
         """
         low, high = super().placement_range_seconds(window_seconds)
-        reach = self._reach_seconds(self.network)
+        reach = self.violation.reach_seconds(self.network)
         if reach > 0.0:
             signal = float(self.generator.get_max_generated_duration())
             extents = {SIGNAL_EXTENT: np.array([[signal, 0.0], [0.0, signal]])}
@@ -468,11 +672,11 @@ class HardExampleGenerator(WaveformGenerator):
                 held = "its reference time" if self.allow_partially_out_of_window else \
                     f"its signal (up to {signal:g} s long) and the detector margin"
                 raise ValueError(
-                    f"A WrongDelay hard example shifts its copy up to {reach:g} s from its partner's arrival (the "
-                    f"network's longest light travel plus the largest margin), either way, and keeps it where its "
-                    f"generator places reference times, which leaves {held} in the window: that needs a "
-                    f"placement {2.0 * reach:g} s wide, but the {window_seconds:g} s window and the padding give "
-                    f"{width:g} s. Give a smaller margin, a longer window or more padding."
+                    f"A {type(self.violation).__name__} hard example shifts its copy up to {reach:g} s from its "
+                    f"partner's arrival (the network's longest light travel plus the largest margin), either way, "
+                    f"and keeps it where its generator places reference times, which leaves {held} in the window: "
+                    f"that needs a placement {2.0 * reach:g} s wide, but the {window_seconds:g} s window and the "
+                    f"padding give {width:g} s. Give a smaller margin, a longer window or more padding."
                 )
         return low, high
 
@@ -494,101 +698,23 @@ class HardExampleGenerator(WaveformGenerator):
         # injection chance, from its own chance stream), as a generator's is.
         generator = copy(self.generator)
         generator.injection_chance = 1.0
-        if isinstance(self.violation, MismatchedWaveforms):
-            waveforms, parameters = self._mismatched(
-                generator, num_waveforms, sample_rate_hertz, duration_seconds, streams)
-        else:
-            waveforms, parameters = generator.generate(num_waveforms, sample_rate_hertz, duration_seconds, streams)
-            before, after = self._extent(generator.get_signal_extent_seconds(parameters), num_waveforms)
-            if isinstance(self.violation, TimeReversed):
-                waveforms = _reflect(waveforms)
-                before, after = after, before
-            parameters[SIGNAL_EXTENT] = np.stack([before, after], axis=-1)
+        waveforms, parameters = self.violation.generate(
+            generator, self.network, num_waveforms, sample_rate_hertz, duration_seconds, streams)
         return self.apply_injection_chance(waveforms, streams), parameters
-
-    @staticmethod
-    def _extent(extent, num_waveforms : int):
-        return tuple(np.broadcast_to(np.asarray(side, dtype=np.float64), (num_waveforms,)) for side in extent)
-
-    def _mismatched(self, generator, num_waveforms, sample_rate_hertz, duration_seconds, streams):
-        """Detector j's waveform from the streams that differ under ``comp/{j}`` (see MismatchedWaveforms)."""
-        if self.network is None:
-            raise ValueError("MismatchedWaveforms gives each detector its own waveform: give the generator a network.")
-        violation = self.violation
-        waveforms, parameters, before, after = [], [], [], []
-        for j in range(self._num_detectors(self.network)):
-            routed = _MismatchedStreams(streams, violation.differ, j)
-            component_waveforms, component_parameters = generator.generate(
-                num_waveforms, sample_rate_hertz, duration_seconds, routed)
-            unused = [draw for draw in violation.differ if draw not in routed.routed]
-            if unused:
-                raise ValueError(
-                    f"MismatchedWaveforms differs in {unused}, which {type(generator).__name__} drew "
-                    "nothing from: its waveforms would not differ there."
-                )
-            waveforms.append(jnp.asarray(component_waveforms))
-            parameters.append(component_parameters)
-            extent = self._extent(generator.get_signal_extent_seconds(component_parameters), num_waveforms)
-            before.append(extent[0])
-            after.append(extent[1])
-        waveforms = jnp.stack(waveforms, axis=1)
-        if violation.correlation is not None:
-            rho = np.asarray(
-                violation.correlation.sample(num_waveforms, streams.stream("violation/correlation")), dtype=np.float32)
-            shared, _ = generator.generate(num_waveforms, sample_rate_hertz, duration_seconds, streams)
-            rho = jnp.asarray(rho).reshape((-1, 1, 1, 1))
-            waveforms = jnp.sqrt(rho) * jnp.asarray(shared)[:, None] + jnp.sqrt(1.0 - rho) * waveforms
-        common = _common_values(parameters)
-        common[SIGNAL_EXTENT] = np.stack([np.max(before, axis=0), np.max(after, axis=0)], axis=-1)
-        return waveforms, common
 
     def detector_balance(self, polarisations, background, sample_rate_hertz : float,
                          onsource_duration_seconds : Optional[float] = None):
         """
-        A mismatched waveform's gain for each detector's copy, (Batch,
-        Detectors), or None for the other violations. Detector j's waveform
-        is rescaled so that its noise-weighted polarisation power,
-        <h+, h+> + <hx, hx> in detector j's noise (``background``, its
-        spectrum estimated as SNR scaling's is) over the onsource window, is
-        what detector 0's waveform has there: every detector then carries one
-        source's intrinsic loudness, and its SNR differs from a real
-        signal's only through what the antenna pattern gives
-        (gf.MismatchedWaveforms). ``polarisations`` is (Batch, Detectors, 2,
-        Time), the window the injection layer crops centred in it. A
-        detector whose waveform is empty gets 0.
+        The violation's gain for each detector's copy, (Batch, Detectors), or
+        None (``Violation.detector_balance``: a mismatched waveform's
+        detectors balanced to one source's loudness), its scaling checked
+        again, as it may have changed since the hard example was built.
+        ``polarisations`` is (Batch, Detectors, 2, Time) for one waveform per
+        detector, the window the injection layer crops centred in it.
         """
-        if not isinstance(self.violation, MismatchedWaveforms):
-            return None
-        self._check_scaling()
-        polarisations = ops.convert_to_tensor(polarisations, dtype="float32")
-        spectrum = _spectrum_for(background, sample_rate_hertz, None, None, None, None, None)
-
-        def rho(strain):
-            # Each detector's sqrt(<h, h>) in its own noise, over the onsource window.
-            if onsource_duration_seconds is not None:
-                strain = gf.crop_samples(strain, onsource_duration_seconds, sample_rate_hertz)
-            return gf.snr(strain, spectrum, sample_rate_hertz, per_detector=True)
-
-        reference = ops.broadcast_to(polarisations[:, :1], ops.shape(polarisations))
-        wanted = [rho(reference[:, :, p]) for p in (0, 1)]
-        own = [rho(polarisations[:, :, p]) for p in (0, 1)]
-        # Squared relative to the largest, so a waveform of unit amplitude in
-        # physical noise (an SNR near 1e23) cannot overflow float32.
-        largest = ops.max(ops.stack(wanted + own), axis=0)
-        largest = ops.where(largest > 0, largest, 1.0)
-        wanted, own = (sum((value / largest) ** 2 for value in values) for values in (wanted, own))
-        return ops.where(own > 0, ops.sqrt(wanted / ops.where(own > 0, own, 1.0)), 0.0)
-
-    def _check_scaling(self):
-        """A mismatched waveform is scaled to a network SNR: its detectors' waveforms have no one hrss, hpeak or distance."""
-        type_ = getattr(self.scaling_method, "type_", None)
-        if isinstance(self.violation, MismatchedWaveforms) and type_ is not None \
-                and type_ is not gf.ScalingTypes.SNR:
-            raise ValueError(
-                f"A MismatchedWaveforms hard example is scaled to a network SNR, not {type_}: each detector's waveform "
-                "carries one source's noise-weighted loudness, which no one hrss, hpeak or distance of the "
-                "detectors' different waveforms gives. Give its generator a gf.ScalingTypes.SNR scaling."
-            )
+        self.violation.check_scaling(self.scaling_method)
+        return self.violation.detector_balance(polarisations, background, sample_rate_hertz,
+                                               onsource_duration_seconds)
 
     def draw_projection(
         self, network, time_delays, streams : BatchStreams, label : str, num_examples : int,
@@ -612,73 +738,17 @@ class HardExampleGenerator(WaveformGenerator):
         (Batch,), its reference time's offset from the window's centre, and
         the signal's ``extent_seconds`` (Batch, 2), before and after it.
         """
-        violation = self.violation
         num_detectors = int(ops.shape(time_delays)[-1])
         present = np.asarray(network.present, dtype=np.float64) if isinstance(network, ExampleNetworks) \
             else np.ones((num_examples, num_detectors))
-        if not isinstance(violation, (WrongDelay, OneDetector)):
-            # Every present detector's copy is the mismatched or reversed waveform.
-            return None, None, (present > 0).astype(np.float32)
-        if np.any(np.sum(present > 0, axis=1) < 2):
+        if self.violation.needs_two_detectors and np.any(np.sum(present > 0, axis=1) < 2):
             raise ValueError(
-                f"A {type(violation).__name__} hard example needs two detectors present, but an example has one."
+                f"A {type(self.violation).__name__} hard example needs two detectors present, but an example has one."
             )
 
         def stream(name):
             return streams.stream(f"inject/{label}/violation/{name}")
 
-        rows = np.arange(num_examples)
-        detector = _choose(present, stream("detector"))
-        if isinstance(violation, OneDetector):
-            kept = np.zeros((num_examples, num_detectors), dtype=np.float32)
-            kept[rows, detector] = 1.0
-            return None, kept, kept
-
-        partners = present.copy()
-        partners[rows, detector] = 0.0
-        partner = _choose(partners, stream("partner"))
-        drawn = np.where(stream("sign").random(num_examples) < 0.5, -1.0, 1.0)
-        margin = np.asarray(violation.margin_seconds.sample(num_examples, stream("margin")), dtype=np.float64)
-        location = np.broadcast_to(np.asarray(network.location, dtype=np.float64), (num_examples, num_detectors, 3))
-        light_seconds = np.linalg.norm(location[rows, detector] - location[rows, partner], axis=-1) / C
-        delays = np.asarray(time_delays, dtype=np.float64)
-        reach = light_seconds + margin
-        if offsets_seconds is None or window_seconds is None:
-            raise ValueError(
-                "A WrongDelay hard example keeps its shifted copy in the window, so its projection needs each "
-                "example's placement (the injection parameter 'shift') and the window's length."
-            )
-        arrival = np.asarray(offsets_seconds, dtype=np.float64) + delays[rows, partner]
-        sign = self._direction(drawn, arrival, reach, extent_seconds, float(window_seconds))
-        shifts = np.zeros((num_examples, num_detectors))
-        # The copy's delay from its partner becomes sign x (light travel + margin).
-        shifts[rows, detector] = sign * reach - (delays[rows, detector] - delays[rows, partner])
-        carriers = np.zeros((num_examples, num_detectors), dtype=np.float32)
-        carriers[rows, detector] = 1.0
-        return shifts, None, carriers
-
-    def _direction(self, drawn, arrival, reach, extent_seconds, window_seconds : float):
-        """
-        Each copy's direction: ``drawn``, or the other where only that keeps
-        the copy, ``reach`` from its partner's ``arrival`` (seconds from the
-        window's centre), where the generator places its signals' reference
-        times (``placement_bounds_seconds`` for the signal's
-        ``extent_seconds``, before and after it): its whole signal, the
-        detector margin from the window's edges, as a real signal's reference
-        time is. Where neither does, the partner's own signal is one the
-        window cannot hold (placement centres it, with a warning), and the
-        drawn direction is kept.
-        """
-        if extent_seconds is None and not self.allow_partially_out_of_window:
-            raise ValueError(
-                "A WrongDelay hard example keeps its shifted copy's whole signal in the window, so its projection "
-                "needs each signal's extent (its parameters' signal_extent_seconds)."
-            )
-        low, high, _ = self.placement_bounds_seconds(
-            {SIGNAL_EXTENT: extent_seconds}, window_seconds, int(np.size(arrival)))
-
-        def fits(sign):
-            copy = arrival + sign * reach
-            return (copy >= low) & (copy <= high)
-
-        return np.where(fits(drawn) | ~fits(-drawn), drawn, -drawn)
+        return self.violation.projection(
+            self, network, time_delays, present, stream, num_examples,
+            offsets_seconds, extent_seconds, window_seconds)

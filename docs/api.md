@@ -143,6 +143,7 @@ are never mixed. Each preset's files ship with the package, pinned by sha256; th
 - `OneDetector`: the signal in exactly one present detector, holding the whole network SNR.
 - `MismatchedWaveforms`: a waveform of its own in each detector, differing in the named draws (parameters, or a burst's `noise`) and correlating by an optional `correlation`.
 - `TimeReversed`: the waveform reversed in time about its reference time; only for a `CBCGenerator` or a `RingdownGenerator`, whose reversal leaves its family (`time_reversal_leaves_family`), and refused for every other generator.
+- `Violation`: the base of the violations; each acts only through its own hooks (what it checks, draws and changes in the projection), which `HardExampleGenerator` calls in every case.
 - `ViolationCode`: the codes `ReturnVariables.VIOLATION` gives: NONE 0, WRONG_DELAY 1, ONE_DETECTOR 2, MISMATCHED_WAVEFORMS 3, TIME_REVERSED 4.
 - `WaveformParameter`: one waveform parameter and its label.
 - `WaveformParameters`: the waveform parameters a dataset can return.
