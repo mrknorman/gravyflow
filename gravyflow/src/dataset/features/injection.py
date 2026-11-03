@@ -2145,10 +2145,24 @@ class InjectionGenerator:
                 input_ra, input_dec, gps_time_seconds=gps_time_seconds
             )
 
+            # The window's length (else the onsource's) and each example's
+            # placement: its reference time's realised offset from the
+            # window's centre, seconds.
+            dur = onsource_duration_seconds
+            if dur is None:
+                dur = ops.shape(onsource)[-1] / self.sample_rate_hertz
+            shift_seconds = None if current_shifts is None else \
+                ops.cast(current_shifts, "float32") / self.sample_rate_hertz
+
             # A hard example's change to the projection: each copy's shift
             # beyond its delay, and the detectors that keep the signal.
             violation_shifts, violation_kept = (None, None) if generator.violation is None else \
-                generator.draw_projection(network, time_delays, generator_streams, label, num_inj)
+                generator.draw_projection(
+                    network, time_delays, generator_streams, label, num_inj,
+                    offsets_seconds=shift_seconds,
+                    extent_seconds=self._generator_parameter(injection_parameters, SIGNAL_EXTENT, i),
+                    window_seconds=dur,
+                )
             if violation_shifts is not None:
                 violation_shifts = ops.convert_to_tensor(violation_shifts, dtype="float32")
                 time_delays = time_delays + violation_shifts
@@ -2156,14 +2170,7 @@ class InjectionGenerator:
             # The event-time label (CENTRAL_TIME): the reference time's
             # position in the onsource window at each detector, as a fraction
             # of the window.
-            if return_injection_times and current_shifts is not None:
-                dur = onsource_duration_seconds
-                if dur is None:
-                    # Fallback to calculating from samples
-                     dur = ops.shape(onsource)[-1] / self.sample_rate_hertz
-
-                # The realised offset from the window's centre, in samples.
-                shift_seconds = ops.cast(current_shifts, "float32") / self.sample_rate_hertz
+            if return_injection_times and shift_seconds is not None:
                 t_geocenter = ops.expand_dims(dur / 2.0 + shift_seconds, -1)
 
                 final_time = t_geocenter + time_delays

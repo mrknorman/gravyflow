@@ -10,7 +10,8 @@ crops and whitens them exactly as it does the generator's, so a hard example
 differs from a real one in its violation alone:
 
 - ``gf.WrongDelay``: one present detector's copy is shifted so that its delay
-  from another present detector is that pair's light-travel time plus a margin;
+  from another present detector is that pair's light-travel time plus a margin,
+  in the direction that keeps it in the window where only one does;
 - ``gf.OneDetector``: the signal is in exactly one present detector, which then
   holds the whole network SNR;
 - ``gf.MismatchedWaveforms``: each detector has a waveform of its own, its
@@ -78,6 +79,14 @@ class WrongDelay:
     the generator's ``inject/{g}/violation/{detector,partner,sign,margin}``
     streams. The pair is the example's own, so a network drawn per example
     (gf.Detectors) is respected, and ``CENTRAL_TIME`` gives the shifted arrival.
+
+    The example is placed as the generator's signals are, exactly, and the copy
+    is kept in the window by its direction: the drawn one, or the other where
+    only that keeps the copy (its whole signal, unless the generator allows
+    partial signals) in the window. A window too short for that whatever the
+    placement, shorter than twice the farthest shift (the network's longest
+    light travel plus the largest margin) beside the generator's longest
+    signal, is refused by name when the dataset is built.
     """
     margin_seconds : Union[float, "gf.Distribution"]
 
@@ -236,12 +245,9 @@ class HardExampleGenerator(WaveformGenerator):
     method, injection chance, padding, sky and reference time are the
     generator's; its network is the generator's, or the dataset's. Placement,
     the SNR target over the present detectors, the window and whitening are
-    the injection layer's, as for the generator. One difference is made for
-    the window's sake: a wrong delay's placement allows for the farthest its
-    shifted copy can arrive (``detector_margin_seconds``), so the copy stays
-    in the window; a placement range set within the window
-    (front_padding_duration_seconds and back_padding_duration_seconds) that
-    leaves room for it is the generator's own exactly.
+    the injection layer's, as for the generator, so a hard example sits in the
+    window as a real signal does (a wrong delay keeps its shifted copy there
+    by the copy's direction, gf.WrongDelay).
 
     The violations that move signal between detectors (all but TimeReversed)
     need two detectors present in every example: a network or a num_present
@@ -336,18 +342,42 @@ class HardExampleGenerator(WaveformGenerator):
         """The generator's: a reversed chirp keeps its length, run backwards."""
         return self.generator.in_band_duration_seconds(parameters, lower_frequency_hertz)
 
-    def detector_margin_seconds(self, network=None) -> float:
+    def _reach_seconds(self, network) -> float:
         """
-        The largest delay between the geocentre and a detector's copy: the
-        generator's, and for a wrong delay, the most its copy can be shifted
-        beyond that, the network's longest light-travel time plus the largest
-        margin.
+        The farthest a copy is shifted from its partner's arrival, either way:
+        for a wrong delay, ``network``'s longest light travel plus the largest
+        margin; 0.0 for the other violations, or without a network.
         """
-        network = self.network if network is None else network
-        margin = WaveformGenerator.detector_margin_seconds(self, network)
-        if network is not None and isinstance(self.violation, WrongDelay):
-            margin += float(network.max_arrival_time_difference_seconds) + self.violation.max_margin_seconds
-        return margin
+        if network is None or not isinstance(self.violation, WrongDelay):
+            return 0.0
+        return float(network.max_arrival_time_difference_seconds) + self.violation.max_margin_seconds
+
+    def placement_range_seconds(self, window_seconds : float):
+        """
+        The generator's. A wrong delay refuses a window that cannot hold its
+        shifted copy whatever the placement: one shorter than twice the
+        farthest shift beside the generator's longest signal (its reference
+        time alone, if the generator allows partial signals).
+        """
+        reach = self._reach_seconds(self.network)
+        if reach > 0.0:
+            partial = self.allow_partially_out_of_window
+            signal = 0.0 if partial else float(self.generator.get_max_generated_duration())
+            if 2.0 * reach + signal > window_seconds:
+                held = "its reference time" if partial else f"its signal (up to {signal:g} s long)"
+                raise ValueError(
+                    f"A WrongDelay hard example shifts its copy up to {reach:g} s from its partner's arrival (the "
+                    f"network's longest light travel plus the largest margin), either way, and keeps {held} in the "
+                    f"window: that needs a window of {2.0 * reach + signal:g} s, not {window_seconds:g} s. Give a "
+                    "smaller margin or a longer window."
+                )
+        return super().placement_range_seconds(window_seconds)
+
+    def reference_time_window_seconds(self, window_seconds : float, network=None):
+        """The generator's, widened for a wrong delay by the farthest its copy is shifted from its partner's arrival."""
+        start, end = super().reference_time_window_seconds(window_seconds, network)
+        reach = self._reach_seconds(self.network if network is None else network)
+        return max(start - reach, 0.0), min(end + reach, float(window_seconds))
 
     def generate(
         self,
@@ -409,7 +439,10 @@ class HardExampleGenerator(WaveformGenerator):
         common[SIGNAL_EXTENT] = np.stack([np.max(before, axis=0), np.max(after, axis=0)], axis=-1)
         return waveforms, common
 
-    def draw_projection(self, network, time_delays, streams : BatchStreams, label : str, num_examples : int):
+    def draw_projection(
+        self, network, time_delays, streams : BatchStreams, label : str, num_examples : int,
+        offsets_seconds=None, extent_seconds=None, window_seconds : Optional[float] = None,
+    ):
         """
         The violation's change to the projection, from the generator's
         ``inject/{label}/violation/...`` streams: (shifts, kept), each
@@ -417,6 +450,11 @@ class HardExampleGenerator(WaveformGenerator):
         detector's copy is moved by, beyond its own delay (``time_delays``,
         the projection's, (Batch, Detectors)); ``kept`` is 1 in the detectors
         that keep the signal and 0 in the others.
+
+        A wrong delay keeps its copy in the window (``window_seconds`` long)
+        by its direction, from each example's placement, ``offsets_seconds``
+        (Batch,), its reference time's offset from the window's centre, and
+        the signal's ``extent_seconds`` (Batch, 2), before and after it.
         """
         violation = self.violation
         if not isinstance(violation, (WrongDelay, OneDetector)):
@@ -442,12 +480,48 @@ class HardExampleGenerator(WaveformGenerator):
         partners = present.copy()
         partners[rows, detector] = 0.0
         partner = _choose(partners, stream("partner"))
-        sign = np.where(stream("sign").random(num_examples) < 0.5, -1.0, 1.0)
+        drawn = np.where(stream("sign").random(num_examples) < 0.5, -1.0, 1.0)
         margin = np.asarray(violation.margin_seconds.sample(num_examples, stream("margin")), dtype=np.float64)
         location = np.broadcast_to(np.asarray(network.location, dtype=np.float64), (num_examples, num_detectors, 3))
         light_seconds = np.linalg.norm(location[rows, detector] - location[rows, partner], axis=-1) / C
         delays = np.asarray(time_delays, dtype=np.float64)
+        reach = light_seconds + margin
+        if offsets_seconds is None or window_seconds is None:
+            raise ValueError(
+                "A WrongDelay hard example keeps its shifted copy in the window, so its projection needs each "
+                "example's placement (the injection parameter 'shift') and the window's length."
+            )
+        arrival = np.asarray(offsets_seconds, dtype=np.float64) + delays[rows, partner]
+        sign = self._direction(drawn, arrival, reach, extent_seconds, float(window_seconds))
         shifts = np.zeros((num_examples, num_detectors))
         # The copy's delay from its partner becomes sign x (light travel + margin).
-        shifts[rows, detector] = sign * (light_seconds + margin) - (delays[rows, detector] - delays[rows, partner])
+        shifts[rows, detector] = sign * reach - (delays[rows, detector] - delays[rows, partner])
         return shifts, None
+
+    def _direction(self, drawn, arrival, reach, extent_seconds, window_seconds : float):
+        """
+        Each copy's direction: ``drawn``, or the other where only that keeps
+        the copy, ``reach`` from its partner's ``arrival`` (seconds from the
+        window's centre), in the window: its whole signal, ``extent_seconds``
+        before and after it, or its reference time if the generator allows
+        partial signals. Where neither does, the partner's own signal is one
+        the window cannot hold (placement centres it, with a warning), and
+        the drawn direction is kept.
+        """
+        if self.allow_partially_out_of_window:
+            before = after = 0.0
+        elif extent_seconds is None:
+            raise ValueError(
+                "A WrongDelay hard example keeps its shifted copy's whole signal in the window, so its projection "
+                "needs each signal's extent (its parameters' signal_extent_seconds)."
+            )
+        else:
+            extent = np.asarray(extent_seconds, dtype=np.float64)
+            before, after = extent[..., 0], extent[..., 1]
+        half = window_seconds / 2.0
+
+        def fits(sign):
+            copy = arrival + sign * reach
+            return (copy - before >= -half) & (copy + after <= half)
+
+        return np.where(fits(drawn) | ~fits(-drawn), drawn, -drawn)

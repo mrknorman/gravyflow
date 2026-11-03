@@ -162,15 +162,59 @@ def test_a_wrong_delay_exceeds_its_pairs_light_travel_time_by_its_margin(ifos):
         np.testing.assert_array_less(0.0, np.where(present, np.asarray(y["DETECTOR_SNR"])[:, 0], 1.0))
 
 
-def test_a_wrong_delays_placement_allows_for_its_shifted_copy():
+def test_a_wrong_delay_is_placed_as_its_generators_signals():
+    """
+    A wrong delay's placement and sky are its generator's exactly: under one name, every detector's copy but the
+    shifted one arrives where the generator's own signal does, to the bit, so where a signal sits in the window says
+    nothing of its kind.
+    """
+    def central_times(generator):
+        return np.asarray(dataset([generator])[0][1]["CENTRAL_TIME"])[:, 0]
+
+    real = central_times(wnb(name="w"))
+    hard = central_times(gf.HardExampleGenerator(wnb(), gf.WrongDelay(uniform(0.005, 0.02)), name="w"))
+    np.testing.assert_array_equal(np.sum(real != hard, axis=-1), 1)
+
+
+def test_a_wrong_delays_copy_stays_in_the_window():
+    """
+    The copy is shifted in the drawn direction, or the other where only that keeps it in the window: with margins
+    that leave little room, every copy, its whole extent, still lies in the window, and holds its share of the SNR.
+    """
+    generator = gf.HardExampleGenerator(wnb(), gf.WrongDelay(uniform(0.3, 0.4)), name="far")
+    ds = dataset([generator])
+    for k in range(3):
+        _, y = ds[k]
+        times = np.asarray(y["CENTRAL_TIME"], np.float64)[:, 0]  # The window is 1 s.
+        # The burst extends 0.05 s either side of its reference time; placement rounds to a sample.
+        assert np.all(times >= 0.05 - 1.0 / SAMPLE_RATE) and np.all(times <= 0.95 + 1.0 / SAMPLE_RATE), (k, times)
+        np.testing.assert_array_less(0.0, np.asarray(y["DETECTOR_SNR"])[:, 0])
+
+
+def test_a_window_that_cannot_hold_a_wrong_delays_copy_is_refused():
+    """
+    A margin whose copy, shifted either way from its partner, could leave the window is refused by name when the
+    dataset is built: twice the longest shift (the network's longest light travel plus the largest margin), plus
+    the generator's longest signal unless it allows partial signals, must fit the window.
+    """
+    for margin, partial in ((2.0, False), (uniform(0.3, 0.5), False), (uniform(0.3, 0.5), True), (0.45, False)):
+        with pytest.raises(ValueError, match="window"):
+            dataset([gf.HardExampleGenerator(wnb(allow_partially_out_of_window=partial), gf.WrongDelay(margin))])
+    dataset([gf.HardExampleGenerator(wnb(allow_partially_out_of_window=True), gf.WrongDelay(0.45))])
+
+
+def test_a_wrong_delays_reference_times_reach_its_shifted_copy():
+    """Where a reference time can fall in any detector widens, for a wrong delay, by the farthest its copy shifts."""
     network = gf.Network([gf.IFO.H1, gf.IFO.L1, gf.IFO.V1])
-    base = wnb(network=network)
-    hard = gf.HardExampleGenerator(wnb(network=network), gf.WrongDelay(uniform(0.001, 0.03)))
-    assert hard.detector_margin_seconds() == pytest.approx(
-        base.detector_margin_seconds() + network.max_arrival_time_difference_seconds + 0.03)
+    padded = dict(front_padding_duration_seconds=0.1, back_padding_duration_seconds=0.1)
+    start, end = wnb(network=network, **padded).reference_time_window_seconds(1.0)
+    reach = network.max_arrival_time_difference_seconds + 0.03
+    hard = gf.HardExampleGenerator(wnb(network=network, **padded), gf.WrongDelay(uniform(0.01, 0.03)))
+    assert hard.reference_time_window_seconds(1.0) == pytest.approx((start - reach, end + reach))
+    assert hard.detector_margin_seconds() == wnb(network=network).detector_margin_seconds()
     for violation in (gf.OneDetector(), gf.TimeReversed(), gf.MismatchedWaveforms("noise")):
-        assert gf.HardExampleGenerator(wnb(network=network), violation).detector_margin_seconds() \
-            == base.detector_margin_seconds()
+        assert gf.HardExampleGenerator(wnb(network=network, **padded), violation).reference_time_window_seconds(1.0) \
+            == (start, end)
 
 
 @pytest.mark.parametrize("ifos", [(gf.IFO.H1, gf.IFO.L1, gf.IFO.V1), DETECTORS], ids=["fixed", "per example"])

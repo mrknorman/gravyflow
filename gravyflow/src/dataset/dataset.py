@@ -1248,14 +1248,15 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
                         f"{type(generator).__name__} has no scaling_method; give it a "
                         "gf.ScalingMethod to inject it into a dataset."
                     )
-                # None means "as far as the window allows".
-                front = generator.front_padding_duration_seconds or 0.0
-                back = generator.back_padding_duration_seconds or 0.0
+                # The generator's placement range in the window (padding None is
+                # as far as the window allows); a generator refuses a window it
+                # cannot place its signals in.
+                low, high = generator.placement_range_seconds(self.onsource_duration_seconds)
 
                 # Condition: padding <= onsource / 2
                 # If padding is larger, the signal center (placed at center of window)
                 # could be shifted outside the cropped onsource window.
-                max_padding = max(front, back)
+                max_padding = max(-low, high)
                 limit = self.onsource_duration_seconds / 2.0
                 
                 if max_padding > limit:
