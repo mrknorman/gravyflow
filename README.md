@@ -165,6 +165,38 @@ inputs, _ = dataset[0]
 print(inputs["DETECTOR_GEOMETRY"].shape, inputs["DETECTOR_MASK"].shape)  # (32, 4, 9) (32, 4)
 ```
 
+### Hard examples
+
+`gf.HardExampleGenerator(generator, violation)` gives a generator's signals with one violation of what a detector
+network can receive from a real source, matched to the generator's own in everything else: its draws (under its own
+name), placement, SNR target over the present detectors, window and whitening. The violations:
+`gf.WrongDelay(margin_seconds)`, one present detector's copy shifted beyond its delay from another by their light
+travel plus the margin; `gf.OneDetector()`, the signal in one present detector alone; `gf.MismatchedWaveforms(differ)`,
+a waveform of its own in each detector, differing in the named draws that change its shape (a binary's masses or
+spins, a burst's frequencies, length or noise) and balanced to one source's loudness; and `gf.TimeReversed()`, the
+waveform reversed in time, only for a binary or a ringdown, whose reversal is a waveform no source of their kind
+makes. `ReturnVariables.VIOLATION` (B, G) labels each generator's `gf.ViolationCode` (NONE, 0, for a real signal),
+and `ReturnVariables.VIOLATION_DETECTORS` (B, G, IFO) the detectors whose copies carry it (a wrong delay's shifted
+detector, the one detector holding a one-detector signal, every present detector for a mismatched or reversed
+waveform), both NaN where the generator injected nothing.
+
+```python
+binary = gf.CBCGenerator(mass_1_msun=uniform(15.0, 80.0), mass_2_msun=uniform(15.0, 80.0),
+                         scaling_method=gf.ScalingMethod(uniform(8.0, 15.0), gf.ScalingTypes.SNR))
+late = gf.HardExampleGenerator(binary, gf.WrongDelay(uniform(0.002, 0.02)), name="late")
+dataset = gf.Dataset(
+    seed=1,
+    group="train",
+    noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.COLORED),
+    ifos=[gf.IFO.H1, gf.IFO.L1, gf.IFO.V1],
+    waveform_generators=[late],
+    input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
+    output_variables=[gf.ReturnVariables.VIOLATION, gf.ReturnVariables.VIOLATION_DETECTORS],
+)
+_, outputs = dataset[0]
+print(outputs["VIOLATION"].shape, outputs["VIOLATION_DETECTORS"].shape)  # (32, 1) (32, 1, 3)
+```
+
 ## 4. Quick start: a CNN on a laptop CPU
 
 One command trains the CNN of Gabbard *et al.* (2017) on simulated binary black hole signals (IMRPhenomD, masses

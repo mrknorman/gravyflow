@@ -99,6 +99,15 @@ class WrongDelay:
     streams. The pair is the example's own, so a network drawn per example
     (gf.Detectors) is respected, and ``CENTRAL_TIME`` gives the shifted arrival.
 
+    The margin is exact for the drawn pair only. The shifted copy's delay from
+    each other present detector is what it is: it may exceed that pair's
+    light travel by more than the margin (by more than the largest margin in
+    about a quarter of examples, for margins of 2 to 20 ms on networks of two
+    to four detectors drawn on the sphere), or lie within it. So the margin is a lower bound on the largest violation an
+    example shows, and a margin drawn smaller (a harder example, as a
+    curriculum would draw it) sets that bound, not the violation every pair
+    sees.
+
     The example is placed as the generator's signals are, exactly, and the
     copy's reference time is kept where the generator places its signals'
     reference times (``placement_bounds_seconds``: its whole signal at least
@@ -135,9 +144,14 @@ class WrongDelay:
 class OneDetector:
     """
     The signal in exactly one present detector (uniform among the example's
-    present detectors, from ``inject/{g}/violation/detector``), scaled to the
-    generator's network SNR target, which it then holds alone. The others
+    present detectors, from ``inject/{g}/violation/detector``). The others
     receive no signal: their DETECTOR_SNR is 0 and their CENTRAL_TIME NaN.
+
+    Under SNR scaling it is scaled to the generator's network SNR target,
+    which the one detector then holds alone. Under HRSS, HPEAK or distance
+    scaling its strain is the source's, so its network SNR is that one
+    detector's, below a real signal's of the same target: a cue a model can
+    read, so scale it to an SNR where it must match real signals.
     """
     code : ClassVar[ViolationCode] = ViolationCode.ONE_DETECTOR
 
@@ -159,7 +173,10 @@ class MismatchedWaveforms:
     polarisations give, and a draw of one value is the same in every detector,
     so a mismatch in those draws alone is refused. The presence and the
     placement are shared. A parameter that differs is labelled NaN, as an
-    IncoherentGenerator's is.
+    IncoherentGenerator's is: the label as the generator returns it, so for a
+    binary, which labels its heavier body body 1, a mismatch in mass_1_msun
+    alone can make MASS_1_MSUN, MASS_2_MSUN or both NaN (where a detector's
+    mass 1 falls below the shared mass 2, its bodies swap).
 
     Every detector carries one source's loudness: as it is projected, each
     detector's waveform is rescaled so that its noise-weighted polarisation
@@ -179,10 +196,14 @@ class MismatchedWaveforms:
     example from ``wave/{g}/violation/correlation``) mixes in the shared
     waveform, the one drawn with nothing differing: detector j's is
     sqrt(rho) h_shared + sqrt(1 - rho) h_j, so any two detectors' waveforms
-    correlate by rho. For a burst whose content differs it is a burst of the
-    same parameters (Gaussian content of the same power). rho = 1 would be the
-    coherent signal, a real one, so it is refused; None is rho = 0, the
-    waveforms' own.
+    correlate by rho. That holds for independent content, a white-noise
+    burst's noise, for which the mix is a burst of the same parameters
+    (Gaussian content of the same power). For a binary whose masses differ,
+    the two chirps are not independent, so the realised correlation scatters
+    around rho; and each detector's mix is the beat of two chirps, not any one
+    binary's chirp, a cue a model can read in one detector alone. So give a
+    binary correlation=None. rho = 1 would be the coherent signal, a real one,
+    so it is refused; None is rho = 0, the waveforms' own.
     """
     differ : Tuple[str, ...]
     correlation : Union[None, float, "gf.Distribution"] = None

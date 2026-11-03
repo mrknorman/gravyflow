@@ -358,7 +358,8 @@ class ReturnVariables(Enum):
 
     # What each generator's signal is: its gf.ViolationCode, NONE (0) for a
     # real signal and the violation's code for a hard example
-    # (gf.HardExampleGenerator), so evaluation can score each kind. Refused
+    # (gf.HardExampleGenerator), so evaluation can score each kind: float32,
+    # NaN where the generator injected nothing (its injection_chance). Refused
     # with an IncoherentGenerator, whose detectors' waveforms differ though it
     # names no violation.
     VIOLATION = ReturnVariable(28, (BATCH, GENERATOR))

@@ -142,10 +142,15 @@ repository before it may need the changes below.
   what a detector network can receive from a real source: `gf.WrongDelay(margin_seconds)` (one present detector's copy
   shifted so that its delay from another present detector, the example's own pair, is their light-travel time plus a
   margin drawn per example, of at least 1 us, so that every wrong delay exceeds light travel after the projection's
-  float32 rounding), `gf.OneDetector()` (the signal in exactly one present detector, which holds the whole network SNR
-  target), `gf.MismatchedWaveforms(differ, correlation=None)` (a waveform of its own in each detector, differing in
+  float32 rounding; exact for the drawn pair only, so the margin is a lower bound on the largest violation an example
+  shows, other pairs with the shifted detector exceeding theirs by more or not at all), `gf.OneDetector()` (the signal in exactly one present detector, which holds the whole network SNR
+  target under SNR scaling; under HRSS, HPEAK or distance scaling its network SNR is that one detector's, below a
+  real signal's), `gf.MismatchedWaveforms(differ, correlation=None)` (a waveform of its own in each detector, differing in
   the named draws, a parameter or a burst's `"noise"`, with every other draw shared, and correlating by `correlation`,
-  finite and below 1, the coherent signal, where given; one draw at least changes the waveform's shape and takes more
+  finite and below 1, the coherent signal, where given (realised for independent content, a burst's noise; for a
+  binary whose masses differ it scatters around it, and each detector's mix is the beat of two chirps, a one-detector
+  cue, so a binary takes `correlation=None`); a differing parameter labelled NaN, as the generator labels it (a
+  binary's heavier body is body 1, so a mismatch in `mass_1_msun` can make either mass's label NaN); one draw at least changes the waveform's shape and takes more
   than one value, since other skies and polarisations give waveforms alike but for the amplitude and the phase each
   detector receives them with, and a draw of one value is every detector's: the generators' `shape_attributes`, a
   binary's masses or spins, a burst's frequencies, length or noise, never its amplitude, phase or polarisation
