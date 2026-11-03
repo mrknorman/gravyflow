@@ -312,7 +312,8 @@ def test_a_binarys_mismatch_changes_its_chirps_shape():
         with pytest.raises(ValueError, match="shape"):
             gf.HardExampleGenerator(cbc, gf.MismatchedWaveforms(differ))
     gf.HardExampleGenerator(cbc, gf.MismatchedWaveforms(("mass_1_msun", "reference_orbital_phase_in")))
-    gf.HardExampleGenerator(cbc, gf.MismatchedWaveforms(("spin_1_in",)))
+    spinning = gf.CBCGenerator(spin_1_in=(constant(0.0), constant(0.0), uniform(-0.5, 0.5)))
+    gf.HardExampleGenerator(spinning, gf.MismatchedWaveforms(("spin_1_in",)))
 
 
 def test_a_bursts_mismatch_changes_its_shape():
@@ -336,6 +337,27 @@ def test_a_bursts_mismatch_changes_its_shape():
     with pytest.raises(ValueError, match="none of them a draw that changes"):
         gf.HardExampleGenerator(
             wnb(polarization_eccentricity=uniform(0.0, 1.0)), gf.MismatchedWaveforms("polarization_eccentricity"))
+
+
+def test_a_mismatch_draws_more_than_one_value():
+    """
+    A draw that changes the shape but takes one value (a binary's masses, by default) is the same in every detector,
+    which then receives the coherent, real signal: a mismatch whose shape draws each take one value is refused.
+    """
+    single = gf.Distribution(possible_values=[30.0], type_=gf.DistributionType.CHOICE)
+    for generator, differ in (
+            (gf.CBCGenerator(), ("mass_1_msun",)),
+            (gf.CBCGenerator(), ("mass_1_msun", "mass_2_msun")),
+            (gf.CBCGenerator(distance_mpc=uniform(100.0, 500.0)), ("mass_1_msun", "distance_mpc")),
+            (gf.CBCGenerator(), ("spin_1_in",)),
+            (gf.CBCGenerator(mass_1_msun=uniform(30.0, 30.0)), ("mass_1_msun",)),
+            (gf.CBCGenerator(mass_1_msun=single), ("mass_1_msun",)),
+            (wnb(), ("duration_seconds", "min_frequency_hertz"))):
+        with pytest.raises(ValueError, match="has one value only"):
+            gf.HardExampleGenerator(generator, gf.MismatchedWaveforms(differ))
+    gf.HardExampleGenerator(gf.CBCGenerator(mass_2_msun=uniform(20.0, 30.0)),
+                            gf.MismatchedWaveforms(("mass_1_msun", "mass_2_msun")))
+    gf.HardExampleGenerator(wnb(), gf.MismatchedWaveforms(("duration_seconds", "noise")))
 
 
 #: Each generator's draws: a base value of every one, then the draws that change its waveform's shape and those that
