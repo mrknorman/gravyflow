@@ -159,8 +159,12 @@ repository before it may need the changes below.
   too short for that is refused by name when the dataset is built. The violations' own draws have streams of their own
   (`inject/{g}/violation/{detector,partner,sign,margin}`, `wave/{g}/violation/correlation`, and
   `wave/{g}/comp/{j}/...` for a detector's differing draws): every existing stream draws as before.
-  `ReturnVariables.VIOLATION` (B, G) gives each generator's `gf.ViolationCode` (NONE, 0, for a real signal), and
-  `CENTRAL_TIME` each copy's arrival (NaN where one detector holds the signal and another none). A violation that
+  `ReturnVariables.VIOLATION` (B, G) gives each generator's `gf.ViolationCode` (NONE, 0, for a real signal),
+  `ReturnVariables.VIOLATION_DETECTORS` (B, G, IFO) which detectors' copies carry it (1, else 0: none for a real
+  signal, the shifted detector of a wrong delay, the one detector holding a one-detector signal, every present
+  detector for a mismatched or reversed waveform, never an absent detector), both float32 and NaN where the generator
+  injected nothing (its `injection_chance`), and `CENTRAL_TIME` each copy's arrival (NaN where one detector holds the
+  signal and another none). A violation that
   needs two detectors present refuses a network or `num_present` that can give fewer.
 
 - **Sites for test networks: LIGO-India, KAGRA and the Einstein Telescope.** `gf.Site` bundles the sites of I1, K1

@@ -491,11 +491,16 @@ class HardExampleGenerator(WaveformGenerator):
     ):
         """
         The violation's change to the projection, from the generator's
-        ``inject/{label}/violation/...`` streams: (shifts, kept), each
-        (Batch, Detectors) or None. ``shifts`` (seconds) is the time each
-        detector's copy is moved by, beyond its own delay (``time_delays``,
-        the projection's, (Batch, Detectors)); ``kept`` is 1 in the detectors
-        that keep the signal and 0 in the others.
+        ``inject/{label}/violation/...`` streams: (shifts, kept, carriers),
+        each (Batch, Detectors). ``shifts`` (seconds, or None) is the time
+        each detector's copy is moved by, beyond its own delay
+        (``time_delays``, the projection's, (Batch, Detectors)); ``kept`` (or
+        None) is 1 in the detectors that keep the signal and 0 in the others;
+        ``carriers`` is 1 in the detectors whose copies carry the violation
+        and 0 in the others (``ReturnVariables.VIOLATION_DETECTORS``): the
+        shifted detector of a wrong delay, the one detector that holds the
+        signal, and every present detector for a mismatched or reversed
+        waveform.
 
         A wrong delay keeps its copy in the window (``window_seconds`` long)
         by its direction, from each example's placement, ``offsets_seconds``
@@ -503,11 +508,12 @@ class HardExampleGenerator(WaveformGenerator):
         the signal's ``extent_seconds`` (Batch, 2), before and after it.
         """
         violation = self.violation
-        if not isinstance(violation, (WrongDelay, OneDetector)):
-            return None, None
         num_detectors = int(ops.shape(time_delays)[-1])
         present = np.asarray(network.present, dtype=np.float64) if isinstance(network, ExampleNetworks) \
             else np.ones((num_examples, num_detectors))
+        if not isinstance(violation, (WrongDelay, OneDetector)):
+            # Every present detector's copy is the mismatched or reversed waveform.
+            return None, None, (present > 0).astype(np.float32)
         if np.any(np.sum(present > 0, axis=1) < 2):
             raise ValueError(
                 f"A {type(violation).__name__} hard example needs two detectors present, but an example has one."
@@ -521,7 +527,7 @@ class HardExampleGenerator(WaveformGenerator):
         if isinstance(violation, OneDetector):
             kept = np.zeros((num_examples, num_detectors), dtype=np.float32)
             kept[rows, detector] = 1.0
-            return None, kept
+            return None, kept, kept
 
         partners = present.copy()
         partners[rows, detector] = 0.0
@@ -542,7 +548,9 @@ class HardExampleGenerator(WaveformGenerator):
         shifts = np.zeros((num_examples, num_detectors))
         # The copy's delay from its partner becomes sign x (light travel + margin).
         shifts[rows, detector] = sign * reach - (delays[rows, detector] - delays[rows, partner])
-        return shifts, None
+        carriers = np.zeros((num_examples, num_detectors), dtype=np.float32)
+        carriers[rows, detector] = 1.0
+        return shifts, None, carriers
 
     def _direction(self, drawn, arrival, reach, extent_seconds, window_seconds : float):
         """

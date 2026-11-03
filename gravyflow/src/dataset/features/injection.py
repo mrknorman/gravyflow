@@ -361,6 +361,17 @@ class ReturnVariables(Enum):
     # (gf.HardExampleGenerator), so evaluation can score each kind.
     VIOLATION = ReturnVariable(28, (BATCH, GENERATOR))
 
+    # Which detectors' copies carry that violation: 1 in each, 0 in the
+    # others (a detector absent from the example's network among them), so a
+    # label per detector or per pair needs no sky to re-derive it. A real
+    # signal: none. gf.WrongDelay: the shifted detector alone (its partner
+    # keeps a real arrival). gf.OneDetector: the one detector that holds the
+    # signal, which no other detector sees. gf.MismatchedWaveforms and
+    # gf.TimeReversed: every present detector, each holding a waveform of its
+    # own, or the reversed one. NaN where the generator injected nothing, as
+    # VIOLATION is.
+    VIOLATION_DETECTORS = ReturnVariable(29, (BATCH, GENERATOR, IFO))
+
     def __lt__(self, other):
         return self.value.index < other.value.index
 
@@ -1669,6 +1680,10 @@ def _stack_generator_labels(labels_list):
             )
     return stacked
 
+# The labels of what each signal is (gf.HardExampleGenerator), made beside its
+# projection.
+VIOLATION_LABELS = (ReturnVariables.VIOLATION, ReturnVariables.VIOLATION_DETECTORS)
+
 # Keys of the source measures InjectionGenerator records with each batch.
 SOURCE_HRSS = "source_hrss"
 SOURCE_HPEAK = "source_hpeak"
@@ -2023,7 +2038,9 @@ class InjectionGenerator:
                   the others (HRSS and HPEAK in physical strain; SNR by the
                   measure SNR scaling uses);
                 - CENTRAL_TIME, when requested: (Generators, Batch, IFOs);
-                - VIOLATION, when requested: each generator's gf.ViolationCode.
+                - VIOLATION, when requested: each generator's gf.ViolationCode;
+                - VIOLATION_DETECTORS, when requested: (Generators, Batch,
+                  IFOs), 1 where the detector's copy carries the violation.
 
         Hard examples (gf.HardExampleGenerator): a violation that changes the
         projection (a wrong delay, one detector) is drawn here, from the
@@ -2180,8 +2197,8 @@ class InjectionGenerator:
 
             # A hard example's change to the projection: each copy's shift
             # beyond its delay, and the detectors that keep the signal.
-            violation_shifts, violation_kept = (None, None) if generator.violation is None else \
-                generator.draw_projection(
+            violation_shifts, violation_kept, violation_carriers = (None, None, None) \
+                if generator.violation is None else generator.draw_projection(
                     network, time_delays, generator_streams, label, num_inj,
                     offsets_seconds=shift_seconds,
                     extent_seconds=self._generator_parameter(injection_parameters, SIGNAL_EXTENT, i),
@@ -2210,9 +2227,16 @@ class InjectionGenerator:
 
                 generator_labels[ReturnVariables.CENTRAL_TIME] = normalized_time
 
-            if parameters_to_return and ReturnVariables.VIOLATION in parameters_to_return:
+            # What the signal is, and which detectors' copies carry it.
+            asked = [variable for variable in VIOLATION_LABELS
+                     if parameters_to_return and variable in parameters_to_return]
+            if ReturnVariables.VIOLATION in asked:
                 code = 0 if generator.violation is None else int(generator.violation.code)
                 generator_labels[ReturnVariables.VIOLATION] = np.full((num_inj,), code, dtype=np.float32)
+            if ReturnVariables.VIOLATION_DETECTORS in asked:
+                generator_labels[ReturnVariables.VIOLATION_DETECTORS] = \
+                    np.zeros(tuple(ops.shape(time_delays)), dtype=np.float32) if violation_carriers is None \
+                    else violation_carriers
 
 
             scaling_dist = gf.Curriculum.resolve(scaling_method.value, epoch)

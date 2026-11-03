@@ -26,7 +26,9 @@ from gravyflow.src.dataset.config import Defaults, WindowSpec, ignore_scale_fact
 from gravyflow.src.dataset.noise.noise import NoiseBatcher, addressed_by_index, obtainer_batcher, reads_real_data
 from gravyflow.src.dataset.acquisition.augmentations import Augmented, augment
 from gravyflow.src.dataset.acquisition.base import BaseDataObtainer
-from gravyflow.src.dataset.features.injection import InjectionGenerator, as_generator_list, check_scaling_matches_noise
+from gravyflow.src.dataset.features.injection import (
+    VIOLATION_LABELS, InjectionGenerator, as_generator_list, check_scaling_matches_noise,
+)
 from gravyflow.src.rng import TREE_VERSION, BatchStreams, SeedTree, check_coordinate, check_name, check_split
 from gravyflow.src.rng import platform
 from gravyflow.src.dataset.acquisition.versions import DATA_VERSIONS
@@ -1588,7 +1590,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         }
         for key in self.variables_to_return:
             if isinstance(key, (gf.WaveformParameters, gf.ScalingTypes)) \
-                    or key in (gf.ReturnVariables.CENTRAL_TIME, gf.ReturnVariables.VIOLATION) \
+                    or key is gf.ReturnVariables.CENTRAL_TIME or key in VIOLATION_LABELS \
                     or key in gf.INJECTION_RECORDS:
                 value = labels.get(key)
                 batch[key] = _batch_first(value) if value is not None else \

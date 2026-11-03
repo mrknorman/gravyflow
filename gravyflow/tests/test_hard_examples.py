@@ -39,7 +39,7 @@ def ringdown(**kwargs):
         "frequency_hertz": constant(100.0), "damping_time_seconds": constant(0.02), **kwargs})
 
 
-def dataset(generators, ifos=(gf.IFO.H1, gf.IFO.L1, gf.IFO.V1), seed=3):
+def dataset(generators, ifos=(gf.IFO.H1, gf.IFO.L1, gf.IFO.V1), seed=3, outputs=()):
     return gf.Dataset(
         seed=seed, group="train",
         noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.COLORED),
@@ -47,7 +47,8 @@ def dataset(generators, ifos=(gf.IFO.H1, gf.IFO.L1, gf.IFO.V1), seed=3):
         waveform_generators=generators,
         sample_rate_hertz=SAMPLE_RATE, onsource_duration_seconds=1.0, offsource_duration_seconds=4.0,
         num_examples_per_batch=BATCH, input_variables=[RV.ONSOURCE, RV.DETECTOR_MASK],
-        output_variables=[RV.INJECTIONS, RV.DETECTOR_SNR, RV.CENTRAL_TIME, RV.VIOLATION, gf.ScalingTypes.SNR],
+        output_variables=[RV.INJECTIONS, RV.DETECTOR_SNR, RV.CENTRAL_TIME, RV.VIOLATION, gf.ScalingTypes.SNR,
+                          *outputs],
     )
 
 
@@ -547,3 +548,37 @@ def test_mismatched_waveforms_of_nothing_are_refused_by_name():
     for differ in (None, (), (1,), ("noise", None)):
         with pytest.raises(ValueError, match="at least one named draw"):
             gf.MismatchedWaveforms(differ)
+
+
+@pytest.mark.parametrize("ifos", [(gf.IFO.H1, gf.IFO.L1, gf.IFO.V1), DETECTORS], ids=["fixed", "per example"])
+def test_violation_detectors_name_each_copy_that_carries_the_violation(ifos):
+    """
+    Per detector: none for a real signal; the shifted copy of a wrong delay (the one detector whose arrival is not
+    the real signal's of its name); the one detector that holds a one-detector signal; every present detector for
+    a mismatched or reversed waveform; never an absent detector; NaN where nothing was injected.
+    """
+    def labels(generators):
+        x, y = dataset(generators, ifos=ifos, outputs=[RV.VIOLATION_DETECTORS])[0]
+        return np.asarray(x["DETECTOR_MASK"]) > 0, y
+
+    _, real = labels([wnb(name="delayed")])
+    present, y = labels([wnb(name="real"), gf.HardExampleGenerator(wnb(), gf.WrongDelay(0.01), name="delayed"),
+                         gf.HardExampleGenerator(wnb(), gf.OneDetector(), name="one"),
+                         gf.HardExampleGenerator(wnb(), gf.MismatchedWaveforms("noise"), name="mismatched"),
+                         gf.HardExampleGenerator(ringdown(), gf.TimeReversed(), name="reversed"),
+                         wnb(name="sometimes", injection_chance=0.5)])
+    carriers = np.asarray(y["VIOLATION_DETECTORS"])
+    assert carriers.shape == (BATCH, 6, present.shape[-1]) and carriers.dtype == np.float32
+    times, each = np.asarray(y["CENTRAL_TIME"]), np.asarray(y["DETECTOR_SNR"])
+    np.testing.assert_array_equal(carriers[:, 0], 0.0)
+    shifted = np.where(present, times[:, 1] != np.asarray(real["CENTRAL_TIME"])[:, 0], False)
+    assert np.all(np.sum(shifted, axis=-1) == 1)
+    np.testing.assert_array_equal(carriers[:, 1], shifted.astype(np.float32))
+    np.testing.assert_array_equal(carriers[:, 2], (each[:, 2] > 0).astype(np.float32))
+    assert np.all(np.sum(carriers[:, 2], axis=-1) == 1)
+    for g in (3, 4):
+        np.testing.assert_array_equal(carriers[:, g], present.astype(np.float32))
+    injected = ~np.isnan(np.asarray(y["VIOLATION"])[:, 5])
+    assert 0 < np.sum(injected) < BATCH
+    assert np.all(np.isnan(carriers[~injected, 5])) and np.all(carriers[injected, 5] == 0.0)
+
