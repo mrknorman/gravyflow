@@ -664,9 +664,9 @@ class Network:
         geometry); the Network then holds that fixed geometry. A Network is
         stateless geometry: it holds no random state, and ``project_wave``
         takes every sky angle from its caller. It compares, as it
-        fingerprints, by that geometry (``specification``), and hashes so:
-        networks built apart of one geometry are equal, as are generators
-        built alike on them.
+        fingerprints, by its specification (``specification``: its detectors,
+        as named or as given geometry), and hashes so: networks built apart of
+        the same detectors are equal, as are generators built alike on them.
         """
         def geometry_rng():
             if rng is None:

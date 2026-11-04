@@ -105,10 +105,20 @@ def equal_by_specification(self, other) -> bool:
     (`config_fingerprint`) are, so it compares as it fingerprints;
     NotImplemented for another type. A class that is hashed too gives a hash
     that equal fingerprints share.
+
+    Equality never raises: a value whose specification holds what no
+    fingerprint reads (a non-finite float, a callable:
+    `UnfingerprintableError`) is equal to itself alone, and unequal to every
+    other, so ``in`` and ``list.index`` still find it among others.
     """
     if type(self) is not type(other):
         return NotImplemented
-    return config_fingerprint(self) == config_fingerprint(other)
+    if self is other:
+        return True
+    try:
+        return config_fingerprint(self) == config_fingerprint(other)
+    except UnfingerprintableError:
+        return False
 
 
 #: The libraries, besides gravyflow, whose code produces a dataset's batch bytes: a

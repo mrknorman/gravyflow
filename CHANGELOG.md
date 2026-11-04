@@ -560,13 +560,15 @@ repository before it may need the changes below.
 
 ### Fixed
 
-- **A network compares by its geometry, as it fingerprints.** `gf.Network` compared, and hashed, by identity, so
+- **A network compares by its specification, as it fingerprints.** `gf.Network` compared, and hashed, by identity, so
   generators built alike on networks built apart (each generator given a list of detectors builds its own), and a copy
   of one, fingerprinted equal but compared unequal. A Network is now equal to another exactly when their fingerprints
-  are, and hashes so. One rule serves every value known by its `specification()`
-  (`fingerprint.equal_by_specification`): a network, a strain source (`gf.GWOSC`, `gf.LocalFrames`), a hard example
-  and an incoherent injection compare by their fingerprints, and against another type return NotImplemented, so
-  Python asks the other. No fingerprint changes.
+  are (its detectors, as named or as given geometry), and hashes so. One rule serves every value known by its
+  `specification()` (`fingerprint.equal_by_specification`): a network, a strain source (`gf.GWOSC`, `gf.LocalFrames`), a
+  hard example and an incoherent injection compare by their fingerprints, and against another type return
+  NotImplemented, so Python asks the other. Equality never raises: a value whose specification holds what no fingerprint
+  reads (a non-finite float, a callable) is equal to itself alone, so `in` and `list.index` still find it among others.
+  No fingerprint changes.
 - **An absent detector's `CENTRAL_TIME` is NaN.** A detector absent from an example's network (`gf.Detectors`) was
   given the time a signal would have arrived at it, though none does. It is now NaN, as a time without its event is.
   Every other per-detector output gives an absent detector what that means, as `ReturnVariables` documents: its

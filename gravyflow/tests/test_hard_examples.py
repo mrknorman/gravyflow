@@ -953,6 +953,28 @@ def test_one_equality_by_specification_serves_every_value_known_by_it():
             assert value != other
 
 
+@pytest.mark.parametrize("unreadable", [float("nan"), float("inf"), len], ids=["nan", "inf", "callable"])
+def test_equality_by_specification_never_raises(unreadable):
+    """
+    A value whose specification holds what no fingerprint reads (a non-finite float, a callable) compares without
+    raising: equal to itself alone, and unequal to every other, one built alike included, so `in` and `list.index`
+    find it among others.
+    """
+    def spoiled(build):
+        value = build()
+        value.injection_chance = unreadable
+        return value
+
+    for build in (lambda: gf.HardExampleGenerator(wnb(), gf.WrongDelay(0.01)),
+                  lambda: gf.IncoherentGenerator([wnb(), wnb()])):
+        value, alike, readable = spoiled(build), spoiled(build), build()
+        assert value == value and not value != value
+        for other in (alike, readable):
+            assert value != other and other != value and not value == other
+        assert value in [readable, alike, value] and [readable, alike, value].index(value) == 2
+        assert readable in [value, readable] and [value, readable].index(readable) == 1
+
+
 def test_values_built_alike_on_networks_built_apart_are_equal():
     """
     A network compares, and hashes, by its geometry, as it fingerprints: so do generators built alike on networks
