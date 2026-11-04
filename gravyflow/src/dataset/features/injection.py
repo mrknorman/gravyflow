@@ -601,22 +601,13 @@ class WaveformGenerator:
         offset that centres it, inside the placement range.
         """
         range_low, range_high = self.placement_range_seconds(window_seconds)
-        low = np.full(num_examples, float(range_low))
-        high = np.full(num_examples, float(range_high))
-        too_long = np.zeros(num_examples, dtype=bool)
-        if not self.allow_partially_out_of_window:
-            before, after = _signal_extent(self, parameters, num_examples)
-            margin = self.detector_margin_seconds()
-            fits_low = before + margin - window_seconds / 2.0
-            fits_high = window_seconds / 2.0 - after - margin
-            low = np.maximum(low, fits_low)
-            high = np.minimum(high, fits_high)
-
-            too_long = low > high
-            centre = np.clip(0.5 * (fits_low + fits_high), range_low, range_high)
-            low = np.where(too_long, centre, low)
-            high = np.where(too_long, centre, high)
-        return low, high, too_long
+        if self.allow_partially_out_of_window:
+            return (np.full(num_examples, float(range_low)), np.full(num_examples, float(range_high)),
+                    np.zeros(num_examples, dtype=bool))
+        before, after = _signal_extent(self, parameters, num_examples)
+        margin = self.detector_margin_seconds()
+        return _narrowed_placement(range_low, range_high, before + margin - window_seconds / 2.0,
+                                   window_seconds / 2.0 - after - margin)
 
     def detector_margin_seconds(self, network=None) -> float:
         """
@@ -1525,6 +1516,20 @@ class CBCGenerator(WaveformGenerator):
             parameters[P.LAMBDA_1], parameters[P.LAMBDA_2],
             parameters[P.REFERENCE_ORBITAL_PHASE_IN], parameters[P.INCLINATION_RADIANS],
         )
+
+
+def _narrowed_placement(range_low : float, range_high : float, fits_low, fits_high):
+    """
+    The placement range, (``range_low``, ``range_high``) seconds, narrowed
+    to each example's (``fits_low``, ``fits_high``), (Batch,), as (low, high,
+    unmet), each (Batch,): where the two do not meet (``unmet``), low = high
+    = the middle of the example's own, inside the placement range.
+    """
+    low = np.maximum(float(range_low), fits_low)
+    high = np.minimum(float(range_high), fits_high)
+    unmet = low > high
+    centre = np.clip(0.5 * (fits_low + fits_high), range_low, range_high)
+    return np.where(unmet, centre, low), np.where(unmet, centre, high), unmet
 
 
 def _signal_extent(generator : WaveformGenerator, parameters, num_examples : int):

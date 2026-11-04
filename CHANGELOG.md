@@ -156,35 +156,38 @@ repository before it may need the changes below.
   from another present detector, the example's own pair, is their light-travel time plus a margin drawn per example, of
   at least 1 us, so that every wrong delay exceeds light travel after the projection's float32 rounding. The margin is
   exact for the drawn pair only: other pairs with the shifted detector exceed theirs by more or not at all, so it is a
-  lower bound on the largest violation an example shows. The example is placed as its generator's signals exactly, and
-  its copy kept where the generator's signals arrive in a detector (`HardExampleGenerator.arrival_bounds_seconds`: the
-  placement bounds, which keep the whole signal the detector margin from the window's edges and inside the padding,
-  widened by that margin), by its direction: the drawn one, or the other where only that keeps it there. So a copy
-  reaches no part of the window a real arrival does not; a window or padding too narrow for that is refused by name when
-  the dataset is built and as the copy is projected, so a `gf.InjectionGenerator` used alone refuses it too. A delay
-  shows only where the window holds something a shift changes, and what a window holds of a signal it cuts off can
-  repeat itself (each generator's `repeats_when_cut`: a periodic wave, a sine-Gaussian or a chirplet whose start and end
-  frequencies can be equal, its envelope's ends outside the window, or a ringdown's tail, a binary's included; never a
-  white-noise burst's noise or a chirplet's changing frequency, and the safe answer, that it can, for a generator that
-  declares none). A shift of that part is a shift by whole periods, or a gain and a phase, so a wrong delay of partial
-  signals of such a generator is refused by name. A whole signal shows its shift by as much as its envelope changes: a
-  long periodic wave or a sine-Gaussian of high quality factor, little.
+  lower bound on the largest violation an example shows. The example is placed as its generator's signals exactly (but
+  for a short partial signal, kept where some of it reaches the window in every detector: below), and its copy kept
+  where the generator's signals arrive in a detector (`HardExampleGenerator.arrival_bounds_seconds`: the placement
+  bounds, which keep the whole signal the detector margin from the window's edges and inside the padding, or some of a
+  partial one in the window, widened by that margin), by its direction: the drawn one, or the other where only that
+  keeps it there. So a copy reaches no part of the window a real arrival does not; a window or padding too narrow for
+  that is refused by name when the dataset is built and as the copy is projected, so a `gf.InjectionGenerator` used
+  alone refuses it too. A delay shows only where the window holds something a shift changes, and what a window holds of
+  a signal it cuts off can repeat itself (each generator's `repeats_when_cut`: a periodic wave, a sine-Gaussian or a
+  chirplet whose start and end frequencies can be equal, its envelope's ends outside the window, or a ringdown's tail, a
+  binary's included; never a white-noise burst's noise or a chirplet's changing frequency, and the safe answer, that it
+  can, for a generator that declares none). A shift of that part is a shift by whole periods, or a gain and a phase, so
+  a wrong delay of partial signals of such a generator is refused by name. A whole signal shows its shift by as much as
+  its envelope changes: a long periodic wave or a sine-Gaussian of high quality factor, little.
 
 - **Hard examples: mismatched waveforms.** `gf.MismatchedWaveforms(differ, correlation=None)` gives each detector a
   waveform of its own, differing in the named draws with every other draw shared. A named draw is a parameter or a
   content draw the generator names among its `shape_attributes` (a white-noise burst's `"noise"`); a differing parameter
   is labelled NaN, as the generator labels it (a binary's heavier body is body 1, so a mismatch in `mass_1_msun` can
-  make either mass's label NaN). One draw at least changes the waveform's shape and takes more than one value, since
-  other skies and polarisations give waveforms alike but for the amplitude and the phase each detector receives them
-  with: the generators' `shape_attributes`, a binary's masses or spins, a burst's frequencies, length or noise, never
-  its amplitude, phase or polarisation eccentricity. A draw that moves the signal's extent, which the one placement of
-  every detector reads, is refused unless it takes one value (the generators' `extent_attributes`: a burst's length, and
-  a white-noise burst's band edges, drawn again with it), so a sine-Gaussian, whose every shape draw sets its envelope's
-  length, takes no mismatch. `correlation`, finite and below 1, mixes in the coherent signal, and is taken only where
-  the detectors differ in content draws alone: a differing parameter's shared draw would give the mix another shape.
-  Each detector's waveform is rescaled to detector 0's noise-weighted polarisation power in that detector's noise, so
-  every detector carries one source's loudness and its SNR differs from a real signal's only through the antenna
-  pattern; a mismatch is scaled to a network SNR only.
+  make either mass's label NaN). One draw at least changes the waveform's shape and differs between every two detectors
+  with probability one (a content draw, or a parameter of a continuous distribution, `gf.Distribution.continuous`: one
+  of one value, or of a few, a CHOICE or a POW_TWO, gives every detector one waveform, a real signal, with nonzero
+  probability), since other skies and polarisations give waveforms alike but for the amplitude and the phase each
+  detector receives them with: the generators' `shape_attributes`, a binary's masses or spins, a burst's frequencies,
+  length or noise, never its amplitude, phase or polarisation eccentricity. A draw that moves the signal's extent, which
+  the one placement of every detector reads, is refused unless it takes one value (the generators' `extent_attributes`:
+  a burst's length, and a white-noise burst's band edges, drawn again with it), so a sine-Gaussian, whose every shape
+  draw sets its envelope's length, takes no mismatch. `correlation`, finite and below 1, mixes in the coherent signal,
+  and is taken only where the detectors differ in content draws alone: a differing parameter's shared draw would give
+  the mix another shape. Each detector's waveform is rescaled to detector 0's noise-weighted polarisation power in that
+  detector's noise, so every detector carries one source's loudness and its SNR differs from a real signal's only
+  through the antenna pattern; a mismatch is scaled to a network SNR only.
 
 - **Hard examples: time reversed.** `gf.TimeReversed()` reverses the waveform about its reference time: a chirp no
   binary makes. It is taken only by a generator that declares its reversal leaves its family
@@ -197,7 +200,13 @@ repository before it may need the changes below.
   carry (`independent_waveforms`: 1 for an aligned-spin binary, sine-Gaussian, chirplet, ringdown or periodic wave; 2
   for a binary that can precess, whose cross polarisation is no quadrature of its plus, and a white-noise burst unless
   its eccentricity is 1 alone), since that many detectors of independent responses receive any waveforms in them. So a
-  wrong delay or a mismatch needs one more independent detector present, a reversal one (`Violation.fewest_detectors`).
+  wrong delay or a mismatch needs one more independent detector present, a reversal one (`Violation.fewest_detectors`),
+  and each of them showing the signal: a partial signal (allow_partially_out_of_window) can arrive in a detector wholly
+  outside the window, so a hard example's placement keeps some of it in the window in every detector, as a whole
+  signal's keeps all of it there (`HardExampleGenerator.placement_bounds_seconds`). Only a signal that reaches less than
+  the detector margin beyond its reference time (a burst shorter than about 42 ms on H1, L1 and V1), or padding beyond
+  the window's edges, is narrowed, so within the margin less that reach of the edges such a signal is a real one; a
+  placement range that keeps none of it in the window is refused by name.
   Detectors count as the rank of the span of their response tensors, to a singular value of 1e-6: detectors of equal or
   opposite responses count once, however far apart (H1 with a slot of H1's arms on the far side of the Earth), and one
   whose response is a combination of others' adds none (the Einstein Telescope's triangle, whose three tensors sum to

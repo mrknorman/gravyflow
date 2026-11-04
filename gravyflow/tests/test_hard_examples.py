@@ -264,6 +264,78 @@ def test_a_wrong_delays_copy_falls_where_real_arrivals_do(margin, padding):
     assert np.any(copies < low[0]) and np.any(copies > high[0])
 
 
+def _short_partial_burst(network, **settings):
+    """A 10 ms burst (5 ms either side of its reference time, less than H1, L1 and V1's 21 ms detector margin)."""
+    return wnb(network=network, duration_seconds=constant(0.01), max_frequency_hertz=constant(520.0),
+               allow_partially_out_of_window=True, **settings)
+
+
+@pytest.mark.parametrize("violation", [gf.WrongDelay(0.002), gf.MismatchedWaveforms("noise")],
+                         ids=["wrong delay", "mismatch"])
+@pytest.mark.parametrize("padding", [None, 0.7], ids=["whole window", "beyond the window"])
+def test_every_present_detectors_window_holds_some_of_a_partial_signal(violation, padding):
+    """
+    A partial signal (allow_partially_out_of_window) can arrive in a detector wholly outside the window: the detector
+    margin beyond its edge, or anywhere beyond it with padding past the edge. A real signal then shows in fewer
+    detectors, and a hard example's would show in fewer than its violation needs, so that it is a real signal. So a
+    hard example's placement keeps some of its signal in the window in every detector, and a wrong delay keeps its
+    copy there too: every arrival of a 10 ms burst lies less than its 5 ms beyond the window's edges.
+    """
+    num_examples, window, half = 50000, 1.0, 0.005
+    network = gf.Network([gf.IFO.H1, gf.IFO.L1, gf.IFO.V1])
+    padded = {} if padding is None else dict(front_padding_duration_seconds=padding,
+                                             back_padding_duration_seconds=padding)
+    hard = gf.HardExampleGenerator(_short_partial_burst(network, **padded), violation)
+    hard.check_window(window)
+    rng = np.random.default_rng(1)
+    extent = np.tile([half, half], (num_examples, 1))
+    low, high, _ = hard.placement_bounds_seconds({SIGNAL_EXTENT: extent}, window, num_examples)
+    offsets = low + (high - low) * rng.random(num_examples)
+    delays = np.asarray(network.get_time_delay(
+        np.float32(2.0 * np.pi * rng.random(num_examples)),
+        np.float32(np.arcsin(2.0 * rng.random(num_examples) - 1.0))), np.float64)
+    shifts = hard.draw_projection(
+        network, delays, gf.SeedTree(5).batch("train", 0, 0), "hard", num_examples,
+        offsets_seconds=offsets, extent_seconds=extent, window_seconds=window)
+    arrivals = offsets[:, None] + delays + (0.0 if shifts is None else shifts)
+    # Float32 delays: an arrival lies a float32 delay from a float64 placement.
+    resolution = 1.0e-6
+    assert np.all(arrivals >= -window / 2.0 - half - resolution), np.min(arrivals)
+    assert np.all(arrivals <= window / 2.0 + half + resolution), np.max(arrivals)
+
+
+def test_a_partial_signal_is_placed_as_its_generators_wherever_every_detector_holds_some_of_it():
+    """
+    A hard example's partial signals are placed as its generator's wherever each detector's arrival holds some of the
+    signal: a 0.1 s burst, which reaches beyond its reference time farther than the detector margin, exactly. Only a
+    signal that reaches less far, a 10 ms burst, is kept from the window's edges by the margin less its reach, and
+    whole signals are placed as the generator's.
+    """
+    network = gf.Network([gf.IFO.H1, gf.IFO.L1, gf.IFO.V1])
+    margin = network.max_geocentre_delay_seconds()
+    for half, partial, narrowed in ((0.05, True, 0.0), (0.005, True, margin - 0.005), (0.005, False, 0.0)):
+        def burst():
+            return wnb(network=network, duration_seconds=constant(2.0 * half), max_frequency_hertz=constant(520.0),
+                       allow_partially_out_of_window=partial)
+
+        real, hard = burst(), gf.HardExampleGenerator(burst(), gf.MismatchedWaveforms("noise"))
+        extent = {SIGNAL_EXTENT: np.tile([half, half], (4, 1)), gf.WaveformParameters.DURATION_SECONDS: 2.0 * half}
+        real_low, real_high, _ = real.placement_bounds_seconds(extent, 1.0, 4)
+        low, high, _ = hard.placement_bounds_seconds(extent, 1.0, 4)
+        np.testing.assert_allclose(low, real_low + narrowed, rtol=0.0, atol=1.0e-12)
+        np.testing.assert_allclose(high, real_high - narrowed, rtol=0.0, atol=1.0e-12)
+
+
+def test_a_placement_that_keeps_no_part_of_a_partial_signal_in_the_window_is_refused():
+    """A placement range wholly beyond where some of a hard example's signal reaches the window is refused by name."""
+    network = gf.Network([gf.IFO.H1, gf.IFO.L1, gf.IFO.V1])
+    hard = gf.HardExampleGenerator(
+        _short_partial_burst(network, front_padding_duration_seconds=-0.6, back_padding_duration_seconds=0.7),
+        gf.MismatchedWaveforms("noise"))
+    with pytest.raises(ValueError, match="keeps none of its signal in the window"):
+        hard.placement_bounds_seconds({SIGNAL_EXTENT: np.tile([0.005, 0.005], (4, 1))}, 1.0, 4)
+
+
 def test_a_window_that_cannot_hold_a_wrong_delays_copy_is_refused():
     """
     A margin whose copy, shifted either way from its partner, could leave where its generator's signals arrive is
@@ -271,8 +343,9 @@ def test_a_window_that_cannot_hold_a_wrong_delays_copy_is_refused():
     largest margin) must fit the arrival bounds of the generator's longest signal (its placement bounds, the window
     less that signal and the detector margin either side, inside the padding, or the padding alone if it allows
     partial signals, widened by the detector margin). With H1, L1 and V1 (light travel up to 27 ms, a detector
-    margin of 21 ms) and a 0.1 s burst in a 1 s window, that is 0.9 s, 0.24 s with 0.1 s of padding and 1.04 s
-    for partial signals.
+    margin of 21 ms) and a 0.1 s burst in a 1 s window, that is 0.9 s, 0.24 s with 0.1 s of padding and 1.0 s
+    for partial signals (the range of a point, the shortest partial signal, whose placement keeps it the detector
+    margin from the window's edges).
     """
     padded = dict(front_padding_duration_seconds=0.1, back_padding_duration_seconds=0.1)
     for margin, settings in ((2.0, {}), (uniform(0.3, 0.5), {}), (0.45, {}), (0.43, {}), (0.1, padded),

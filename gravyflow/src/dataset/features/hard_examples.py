@@ -6,8 +6,10 @@ violation of what a real signal is.
 A ``gf.HardExampleGenerator`` wraps a generator and one violation. It draws its
 waveforms as the generator does (its own draws, under its own name, from the
 generator's distributions), and the injection layer places, projects, scales,
-crops and whitens them exactly as it does the generator's, so a hard example
-differs from a real one in its violation alone:
+crops and whitens them exactly as it does the generator's (but that a short
+partial signal is kept where some of it reaches the window in every detector,
+``HardExampleGenerator.placement_bounds_seconds``), so a hard example differs
+from a real one in its violation alone:
 
 - ``gf.WrongDelay``: one present detector's copy is shifted so that its delay
   from another present detector is that pair's light-travel time plus a margin,
@@ -41,7 +43,7 @@ import gravyflow as gf
 from gravyflow.src.dataset.conditioning.detector import C, ExampleNetworks
 from gravyflow.src.dataset.features.injection import (
     SIGNAL_EXTENT, IncoherentGenerator, WaveformGenerator, _common_values, _equal_by_specification,
-    _signal_extent, get_support_bounds,
+    _narrowed_placement, _signal_extent, get_support_bounds,
 )
 from gravyflow.src.dataset.tools.snr import _spectrum_for
 from gravyflow.src.rng.consumers import check_name
@@ -248,11 +250,13 @@ class WrongDelay(Violation):
     than an SNR of 1 of it. A label of what a model can detect needs a margin
     of its own, measured on the examples.
 
-    The example is placed as the generator's signals are, exactly, and the
-    copy's reference time is kept where a real signal's reference time
-    arrives in a detector (``arrival_bounds_seconds``: the generator's
-    placement bounds widened by the detector margin, which leaves its whole
-    signal in the window unless the generator allows partial signals), by
+    The example is placed as the generator's signals are, exactly (a short
+    partial signal kept where some of it reaches the window in every detector,
+    HardExampleGenerator.placement_bounds_seconds), and the copy's reference
+    time is kept where a real signal's reference time arrives in a detector
+    (``arrival_bounds_seconds``: the placement bounds widened by the detector
+    margin, which leave the whole signal in the window, or some of a partial
+    one), by
     its direction: the drawn one, or the other where only that keeps it
     there. So the copy reaches no part of the window a real arrival does not,
     though its density near the range's edges need not be a real arrival's.
@@ -356,9 +360,9 @@ class WrongDelay(Violation):
         and where neither does, the copy lies outside it by no more than its
         partner, which placement's rounding to a sample can put there.
         """
-        if extent_seconds is None and not hard_example.allow_partially_out_of_window:
+        if extent_seconds is None:
             raise ValueError(
-                "A WrongDelay hard example keeps its shifted copy where real signals arrive, its whole signal in "
+                "A WrongDelay hard example keeps its shifted copy where real signals arrive, some of its signal in "
                 "the window, so its projection needs each signal's extent (its parameters' signal_extent_seconds)."
             )
         low, high, _ = hard_example.arrival_bounds_seconds(
@@ -765,7 +769,10 @@ class HardExampleGenerator(WaveformGenerator):
     the SNR target over the present detectors, the window and whitening are
     the injection layer's, as for the generator, so a hard example sits in the
     window as a real signal does (a wrong delay keeps its shifted copy where
-    its generator's signals arrive by the copy's direction, gf.WrongDelay).
+    its generator's signals arrive by the copy's direction, gf.WrongDelay),
+    but that a short partial signal is kept where some of it reaches the
+    window in every detector (``placement_bounds_seconds``), where a real one
+    can show in fewer detectors than the violation needs.
 
     The violation acts through its own hooks (``Violation``), which this calls
     in every case. Every example needs the independent detectors present
@@ -926,16 +933,49 @@ class HardExampleGenerator(WaveformGenerator):
         """The generator's: a reversed chirp keeps its length, run backwards."""
         return self.generator.in_band_duration_seconds(parameters, lower_frequency_hertz)
 
+    def placement_bounds_seconds(self, parameters, window_seconds : float, num_examples : int):
+        """
+        Each example's range of its reference time's offset from the
+        window's centre, (low, high, too_long), each (Batch,): its
+        generator's (``WaveformGenerator.placement_bounds_seconds``), but
+        for partial signals narrowed as a whole signal's range is, mirrored,
+        so that some of the signal (``get_signal_extent_seconds``), delayed to
+        any detector by up to the detector margin, lies in the window. A real
+        signal may arrive in a detector wholly outside the window and show in
+        the others alone, but a hard example's would then show in fewer
+        detectors than its violation needs (``Violation.fewest_detectors``),
+        where it is a real signal. Only a signal that reaches less than the
+        detector margin beyond its reference time (a burst shorter than twice
+        it), or placement padding beyond the window's edges, is narrowed, so
+        within the margin less that reach of the window's edges a short
+        partial signal is a real one. A range that holds none of the signal
+        anywhere is refused by name.
+        """
+        if not self.allow_partially_out_of_window:
+            return super().placement_bounds_seconds(parameters, window_seconds, num_examples)
+        before, after = _signal_extent(self, parameters, num_examples)
+        margin = self.detector_margin_seconds()
+        range_low, range_high = self.placement_range_seconds(window_seconds)
+        low, high, unmet = _narrowed_placement(range_low, range_high, margin - after - window_seconds / 2.0,
+                                               window_seconds / 2.0 + before - margin)
+        if np.any(unmet):
+            raise ValueError(
+                f"A {type(self.violation).__name__} hard example of partial signals keeps some of its signal in the "
+                f"window in every detector, but its placement range ({range_low:g} to {range_high:g} s from the "
+                f"{window_seconds:g} s window's centre), less the detector margin ({margin:g} s), keeps none of its "
+                "signal in the window: bring its padding inside the window."
+            )
+        return low, high, unmet
+
     def arrival_bounds_seconds(self, parameters, window_seconds : float, num_examples : int):
         """
         Where each example's real reference time can arrive in a detector, as
         an offset from the window's centre, (low, high, too_long), each
         (Batch,): its placement bounds (``placement_bounds_seconds``, whose
         ``too_long`` it passes on) widened by the detector margin, the
-        farthest a detector's arrival lies from the placed one. Unless the
-        generator allows partial signals, the whole signal arriving there
-        lies in the window, as the placement narrowed its bounds for exactly
-        that.
+        farthest a detector's arrival lies from the placed one. The window
+        holds the whole signal arriving there, as the placement narrowed its
+        bounds for exactly that, or for partial signals some of it.
         """
         low, high, too_long = self.placement_bounds_seconds(parameters, window_seconds, num_examples)
         margin = self.detector_margin_seconds()
@@ -947,8 +987,9 @@ class HardExampleGenerator(WaveformGenerator):
         (``Violation.reach_seconds``) whatever the placement: the copy is kept
         where real signals arrive (``arrival_bounds_seconds``) and lies up to
         that reach from a real arrival, which can lie anywhere there, so that
-        range must be twice the reach wide for any signal of the generator,
-        its longest put either side of its reference time. Checked when a
+        range must be twice the reach wide for any signal of the generator:
+        its longest put either side of its reference time, and for partial
+        signals, whose range narrows as a signal shortens, a point. Checked when a
         dataset is built, and at every projection (``draw_projection``), where
         the window meets the violation, so a gf.InjectionGenerator used alone
         refuses it too.
@@ -956,11 +997,11 @@ class HardExampleGenerator(WaveformGenerator):
         reach = self.violation.reach_seconds(self.network)
         if reach > 0.0:
             signal = float(self.generator.get_max_generated_duration())
-            extents = {SIGNAL_EXTENT: np.array([[signal, 0.0], [0.0, signal]])}
-            earliest, latest, too_long = self.arrival_bounds_seconds(extents, window_seconds, 2)
+            extents = {SIGNAL_EXTENT: np.array([[signal, 0.0], [0.0, signal], [0.0, 0.0]])}
+            earliest, latest, too_long = self.arrival_bounds_seconds(extents, window_seconds, 3)
             width = 0.0 if np.any(too_long) else float(np.min(latest - earliest))
             if 2.0 * reach > width:
-                held = "its reference time" if self.allow_partially_out_of_window else \
+                held = "some of its signal" if self.allow_partially_out_of_window else \
                     f"its signal (up to {signal:g} s long)"
                 name = type(self.violation).__name__
                 raise ValueError(
