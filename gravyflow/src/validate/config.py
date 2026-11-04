@@ -40,11 +40,6 @@ class ValidationConfig:
     snr_range: Tuple[float, float] = (0.0, 20.0)
     snr_bin_width: float = 1.0
     num_worst_per_bin: int = 5
-    # The efficiency set's size (default num_examples), in either mode: a curve at a few
-    # SNRs rarely needs as many injections as the false-alarm background needs noise
-    # windows. Unset, it is left out of the fingerprint, which is then what it was before
-    # the setting existed.
-    efficiency_num_injections: Optional[int] = field(default=None, metadata={OMITTED_WHEN_NONE: True})
 
     # Target false-alarm rates (Hz) for the efficiency curves.
     far_thresholds: List[float] = field(
@@ -133,6 +128,13 @@ class ValidationConfig:
     # signal within it, against the clean stretch's own spectrum) do not depend on
     # the model. It must hold every window the found test reads.
     injection_stretch_seconds: float = 40.0
+
+    # The efficiency set's size (default num_examples), in either mode: a curve at a few
+    # SNRs rarely needs as many injections as the false-alarm background needs noise
+    # windows. Unset, it is left out of the fingerprint, which is then what it was before
+    # the setting existed. It is the last setting, so a caller that gives the ones before
+    # it by position reads what it read before it existed.
+    efficiency_num_injections: Optional[int] = field(default=None, metadata={OMITTED_WHEN_NONE: True})
 
     def __post_init__(self):
         from .slides import TimeSlides

@@ -288,6 +288,12 @@ def test_an_injection_sets_size_is_a_whole_number(name):
     assert getattr(ValidationConfig(**{name: np.int64(8)}), name) == 8
 
 
+def test_the_efficiency_set_size_moves_no_positional_argument():
+    # It is the last setting, so a caller that gives the settings before it by position reads what it read before
+    # the setting existed.
+    assert [f.name for f in dataclasses.fields(ValidationConfig)][-1] == "efficiency_num_injections"
+
+
 def reach_of(dataset_args, masses=None, spins=None, **settings):
     """The validator's reach for the example population, its component masses (low, high) and aligned spins as given."""
     args = deepcopy(dataset_args)
