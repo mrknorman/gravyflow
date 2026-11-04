@@ -52,7 +52,8 @@ from gravyflow.src.rng.tree import BatchStreams
 #: are float32, within about 0.1 us of the float64 light travel a margin is
 #: added to, so a smaller margin may leave a delay a real source makes. It
 #: guards that rounding alone: a margin this small is a wrong delay by
-#: construction, not one a model can detect (see gf.WrongDelay).
+#: construction, not one a model can be expected to detect (see
+#: gf.WrongDelay).
 MIN_MARGIN_SECONDS = 1.0e-6
 
 
@@ -149,9 +150,9 @@ class Violation:
 
     def reach_seconds(self, network) -> float:
         """
-        The farthest it moves a detector's copy in time from a real arrival of
-        the example's signal, either way, on ``network``: the window holds that
-        much either side of where real signals arrive
+        The farthest a detector's copy lies in time from a real arrival of the
+        example's signal in a present detector, either way, on ``network``:
+        the window holds that much either side of where real signals arrive
         (HardExampleGenerator.check_window). 0.0: it moves no copy.
         """
         return 0.0
