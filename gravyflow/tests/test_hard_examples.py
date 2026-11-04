@@ -974,9 +974,10 @@ DEPENDENT = {
 def test_a_network_counts_the_rank_of_its_responses(network, violation):
     """
     A network's detectors count against its generator's independent waveforms as the rank of the span of their
-    response tensors: detectors of equal, opposite or dependent responses count once, however far apart. Each of
-    these networks counts two, so a white-noise burst's two independent waveforms are refused on it by name when it
-    is set, and one plus polarisation, which needs two, is taken.
+    response tensors: detectors of equal or opposite responses count once, however far apart, and one whose response
+    is a combination of others' adds none (the Einstein Telescope's triangle counts two). Each of these networks
+    counts two, so a white-noise burst's two independent waveforms are refused on it by name when it is set, and one
+    plus polarisation, which needs two, is taken.
     """
     with pytest.raises(ValueError, match="needs 3 detectors present in every example, but its network can have 2"):
         dataset([gf.HardExampleGenerator(wnb(), violation)], ifos=DEPENDENT[network])

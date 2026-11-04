@@ -179,9 +179,9 @@ makes. `ReturnVariables.VIOLATION` (B, G) labels each generator's `gf.ViolationC
 NaN where the generator injected nothing. A network of no more independent detectors than the waveforms a generator's
 polarisations carry (`independent_waveforms`: one for an aligned-spin binary, two for a precessing one or a
 white-noise burst of independent polarisations) receives any waveforms in them, so a wrong delay or a mismatch needs
-one more detector present, counted as the rank of the span of the detectors' response tensors (detectors of equal,
-opposite or dependent responses, as the Einstein Telescope's triangle, count once). A network that can present fewer
-is refused by name.
+one more detector present, counted as the rank of the span of the detectors' response tensors: detectors of equal or
+opposite responses count once, and one whose response is a combination of others' adds none (the Einstein
+Telescope's triangle counts two). A network that can present fewer is refused by name.
 
 ```python
 binary = gf.CBCGenerator(mass_1_msun=uniform(15.0, 80.0), mass_2_msun=uniform(15.0, 80.0),

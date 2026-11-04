@@ -194,10 +194,11 @@ repository before it may need the changes below.
   white-noise burst unless its eccentricity is 1 alone), since that many detectors of independent responses receive
   any waveforms in them. So a wrong delay or a mismatch needs one more independent detector present, a reversal one
   (`Violation.fewest_detectors`). Detectors count as the rank of the span of their response tensors, to a singular
-  value of 1e-6: detectors of equal, opposite or dependent responses count once, however far apart (H1 with a slot
-  of H1's arms on the far side of the Earth; the Einstein Telescope's triangle, whose three tensors sum to zero, counts
-  two). The count is the safe one: it also refuses some networks where dependent detectors would show a violation
-  plainly (two co-located detectors holding different waveforms). A network whose geometry is fixed (a `gf.Network`,
+  value of 1e-6: detectors of equal or opposite responses count once, however far apart (H1 with a slot of H1's arms
+  on the far side of the Earth), and one whose response is a combination of others' adds none (the Einstein
+  Telescope's triangle, whose three tensors sum to zero, counts two). The count is the safe one: it also refuses some
+  networks where dependent detectors would show a violation plainly (two co-located detectors holding different
+  waveforms). A network whose geometry is fixed (a `gf.Network`,
   or a `gf.Detectors` of bundled detectors and slots at fixed sites, every subset of its fewest present detectors
   counted) is refused by name when it is set, and where a slot's geometry is drawn, an example with fewer as it is
   projected (`gf.Detectors.fixed_response` gives a fixed one's tensors). So are a hard example as a component of a `gf.IncoherentGenerator`, which would drop its

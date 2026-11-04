@@ -583,10 +583,12 @@ def _response_rank(response, present) -> np.ndarray:
     ``_INDEPENDENT_RESPONSE``: (Batch,).
 
     Every source gives a detector its response tensor's contraction with the
-    wave's, so detectors whose responses are equal, opposite or sums of
-    others' (a detector given twice, at one site or another; a triangle's
+    wave's, so detectors whose responses are equal, opposite or combinations
+    of others' (a detector given twice, at one site or another; a triangle's
     three, which sum to zero) add a detector but no response in which a
-    coherence violation shows where the others' would not: they count once.
+    coherence violation shows where the others' would not: detectors of
+    equal or opposite responses count once, and one whose response is a
+    combination of others' adds none (a triangle counts two).
     The count is the safe one, so it may refuse a network where dependent
     detectors would show a violation plainly (two detectors of one response
     holding different waveforms).
@@ -668,10 +670,11 @@ class HardExampleGenerator(WaveformGenerator):
     one more than the independent waveforms the generator's polarisations
     carry for a wrong delay or a mismatch, one for a reversal), counted as the
     rank of the span of their response tensors (``_response_rank``:
-    detectors of equal, opposite or dependent responses count once). A
-    network whose geometry is fixed (a Network, or gf.Detectors of bundled
-    detectors and fixed slots) that can give fewer is refused by name when it
-    is set, every subset of its fewest present detectors counted; where a
+    detectors of equal or opposite responses count once, and one whose
+    response is a combination of others' adds none). A network whose
+    geometry is fixed (a Network, or gf.Detectors of bundled detectors and
+    fixed slots) that can give fewer is refused by name when it is set,
+    every subset of its fewest present detectors counted; where a
     slot's geometry is drawn, its fewest present detectors are checked when it
     is set and each example as it is projected. TimeReversed takes only a
     binary, whose reversal leaves its family (gf.TimeReversed).
@@ -769,9 +772,9 @@ class HardExampleGenerator(WaveformGenerator):
             raise ValueError(
                 f"A {type(self.violation).__name__} hard example of a {type(self.generator).__name__} needs "
                 f"{needed} detectors present in every example, but {where} {fewest} (counted as the rank of their "
-                f"response tensors: detectors of equal, opposite or dependent responses count once): there its signal "
-                f"may be one a real source gives (the generator's "
-                f"polarisations carry {self.generator.independent_waveforms} independent waveforms; see "
+                f"response tensors: detectors of equal or opposite responses count once, and one whose response is "
+                f"a combination of others' adds none): there its signal may be one a real source gives (the "
+                f"generator's polarisations carry {self.generator.independent_waveforms} independent waveforms; see "
                 f"gf.{type(self.violation).__name__}). Give it more independent detectors, or a num_present of at "
                 f"least {needed}."
             )
