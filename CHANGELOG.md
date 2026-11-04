@@ -231,16 +231,17 @@ repository before it may need the changes below.
   detectors counted) is refused by name when it is set, and where a slot's geometry is drawn, an example with fewer as
   it is projected (`gf.Detectors.fixed_response` gives a fixed one's tensors). So are a hard example as a component of a
   `gf.IncoherentGenerator`, which would drop its violation (its components are held as a tuple and checked as they are
-  assigned, when it is built or after: each a waveform generator, neither an `IncoherentGenerator` nor a hard example),
-  and `VIOLATION` with an `IncoherentGenerator`, whose detectors' waveforms differ though it names no violation (a
-  labelled mismatch is `gf.MismatchedWaveforms`), wherever the label is made. The count reads the network alone, but
-  what a wrong delay violates depends on the sky too: on three detectors, at the skies where two of them have parallel
-  antenna vectors (F+, Fx), a set of measure zero, a wrong delay of the third of a generator whose polarisations carry
-  two waveforms is a real signal, and near them its violation shrinks as the squared sine of the angle between those
-  vectors. H1 and L1 are nearly co-aligned, so on H1-L1-V1 a wrong delay of V1 carries much less violation than one of
-  H1 or L1: of the change a wrong delay makes to its detector's copy, the network's null stream, which no real source
-  reaches, holds a median share of 0.10 for V1 against 0.41 for H1 and 0.45 for L1 (over an isotropic sky, with equal
-  noise), and under 1 % for V1 on about 9 % of the sky.
+  assigned, when it is built or after, by the rule that checks a hard example's generator: each a coherent waveform
+  generator, neither an `IncoherentGenerator` nor a hard example, each refusal naming the offender by its type; a single
+  generator given in place of the list is refused by name), and `VIOLATION` with an `IncoherentGenerator`, whose
+  detectors' waveforms differ though it names no violation (a labelled mismatch is `gf.MismatchedWaveforms`), wherever
+  the label is made. The count reads the network alone, but what a wrong delay violates depends on the sky too: on three
+  detectors, at the skies where two of them have parallel antenna vectors (F+, Fx), a set of measure zero, a wrong delay
+  of the third of a generator whose polarisations carry two waveforms is a real signal, and near them its violation
+  shrinks as the squared sine of the angle between those vectors. H1 and L1 are nearly co-aligned, so on H1-L1-V1 a
+  wrong delay of V1 carries much less violation than one of H1 or L1: of the change a wrong delay makes to its
+  detector's copy, the network's null stream, which no real source reaches, holds a median share of 0.10 for V1 against
+  0.41 for H1 and 0.45 for L1 (over an isotropic sky, with equal noise), and under 1 % for V1 on about 9 % of the sky.
 
 - **Hard examples: labels and streams.** `ReturnVariables.VIOLATION` (B, G) gives each generator's `gf.ViolationCode`
   (NONE, 0, for a real signal), float32, NaN where the generator injected nothing (its `injection_chance`);

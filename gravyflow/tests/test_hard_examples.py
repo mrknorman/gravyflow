@@ -781,7 +781,7 @@ def test_hard_examples_refuse_what_they_cannot_be():
         gf.WrongDelay(gf.Distribution(mean=0.0, std=0.01, type_=gf.DistributionType.NORMAL))
     with pytest.raises(ValueError, match="does not draw"):
         gf.HardExampleGenerator(wnb(), gf.MismatchedWaveforms("mass_1_msun"))
-    with pytest.raises(TypeError, match="wraps a coherent"):
+    with pytest.raises(TypeError, match="generator is a coherent waveform generator"):
         gf.HardExampleGenerator(gf.HardExampleGenerator(wnb(), gf.WrongDelay(0.01)), gf.WrongDelay(0.01))
     with pytest.raises(TypeError, match="violation is a gf.Violation"):
         gf.HardExampleGenerator(wnb(), "late")
@@ -1020,11 +1020,38 @@ def test_an_incoherent_generators_components_are_waveform_generators():
     incoherent = gf.IncoherentGenerator([wnb(), wnb()])
     for bad in (object(), "wnb", gf.IncoherentGenerator([wnb(), wnb()])):
         for components in ([wnb(), bad], [bad, wnb()]):
-            with pytest.raises(TypeError, match="An IncoherentGenerator's component is a waveform generator"):
+            with pytest.raises(TypeError, match="IncoherentGenerator's component is a coherent"):
                 gf.IncoherentGenerator(components)
-            with pytest.raises(TypeError, match="An IncoherentGenerator's component is a waveform generator"):
+            with pytest.raises(TypeError, match="IncoherentGenerator's component is a coherent"):
                 incoherent.component_generators = components
     assert incoherent == gf.IncoherentGenerator([wnb(), wnb()])
+
+
+def test_a_coherent_generator_is_checked_by_one_rule():
+    """
+    A hard example's generator and an incoherent injection's components are checked by one rule, so each refusal
+    reads the same but for who refuses: it names the offender by its type, never by its whole repr, and says why it
+    cannot be one. A single generator given in place of an incoherent injection's list is refused by name.
+    """
+    hard = gf.HardExampleGenerator(wnb(), gf.WrongDelay(0.01))
+    for offender, name, why in ((gf.IncoherentGenerator([wnb(), wnb()]), "IncoherentGenerator", "its own detectors"),
+                                (hard, "HardExampleGenerator", "violation would be dropped"),
+                                (object(), "object", None), ("a burst", "str", None)):
+        messages = []
+        for refuse in (lambda: gf.HardExampleGenerator(offender, gf.WrongDelay(0.01)),
+                       lambda: gf.IncoherentGenerator([wnb(), offender])):
+            with pytest.raises(TypeError) as refusal:
+                refuse()
+            messages.append(str(refusal.value))
+        (by_hard, by_incoherent) = messages
+        assert by_hard.startswith("A HardExampleGenerator's generator is a coherent waveform generator"), by_hard
+        assert by_incoherent.startswith("An IncoherentGenerator's component is a coherent waveform generator")
+        assert by_hard.split(" is ", 1)[1] == by_incoherent.split(" is ", 1)[1], messages
+        assert f"not an object of type {name}" in by_hard and (why is None or why in by_hard), by_hard
+        assert repr(offender) not in by_hard, by_hard
+    with pytest.raises(TypeError, match="takes a list of component generators, one for each detector, not a single "
+                                        "WNBGenerator"):
+        gf.IncoherentGenerator(wnb())
 
 
 def test_the_usable_violations_are_named_by_their_code():
@@ -1513,7 +1540,7 @@ def test_a_hard_examples_generator_and_violation_are_checked_as_they_are_assigne
     hard = gf.HardExampleGenerator(wnb(), gf.WrongDelay(0.005))
     for other in (gf.IncoherentGenerator([wnb(), wnb(), wnb()]),
                   gf.HardExampleGenerator(wnb(), gf.MismatchedWaveforms("noise")), "a burst"):
-        with pytest.raises(TypeError, match="wraps a coherent"):
+        with pytest.raises(TypeError, match="generator is a coherent waveform generator"):
             hard.generator = other
     with pytest.raises(TypeError, match="violation is a gf.Violation"):
         hard.violation = "late"

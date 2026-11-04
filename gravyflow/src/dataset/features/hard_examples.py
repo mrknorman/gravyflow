@@ -42,7 +42,7 @@ from keras import ops
 import gravyflow as gf
 from gravyflow.src.dataset.conditioning.detector import C, ExampleNetworks
 from gravyflow.src.dataset.features.injection import (
-    SIGNAL_EXTENT, IncoherentGenerator, WaveformGenerator, _common_values,
+    SIGNAL_EXTENT, WaveformGenerator, _check_coherent, _common_values,
     _narrowed_placement, _signal_extent, get_support_bounds,
 )
 from gravyflow.src.dataset.tools.snr import _spectrum_for
@@ -851,12 +851,7 @@ class HardExampleGenerator(WaveformGenerator):
         # Checked on every assignment, not only when it is built: an incoherent generator's detectors would hold
         # waveforms of their own labelled with this violation, and another hard example's violation would be dropped
         # with its projection.
-        if not isinstance(generator, WaveformGenerator) or isinstance(
-                generator, (IncoherentGenerator, HardExampleGenerator)):
-            raise TypeError(
-                f"A HardExampleGenerator wraps a coherent waveform generator (a CBCGenerator, a WNBGenerator...), "
-                f"not {generator!r}."
-            )
+        _check_coherent(generator, "A HardExampleGenerator's generator")
         self._generator = generator
 
     @property

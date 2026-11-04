@@ -1544,13 +1544,37 @@ def _signal_extent(generator : WaveformGenerator, parameters, num_examples : int
                  for side in generator.get_signal_extent_seconds(parameters))
 
 
+def _check_coherent(generator, role : str) -> None:
+    """
+    Refuse by name, as ``role`` (who takes it: "A HardExampleGenerator's
+    generator"), anything but a coherent waveform generator, one whose
+    polarisations a detector receives by projection: not another object, not
+    a gf.IncoherentGenerator, which gives each of its own detectors a
+    waveform, and not a hard example, whose violation would be dropped with
+    its projection. The refusal names the offender by its type.
+    """
+    if not isinstance(generator, WaveformGenerator):
+        why = ""
+    elif isinstance(generator, IncoherentGenerator):
+        why = ", which gives each of its own detectors a waveform"
+    elif generator.violation is not None:
+        why = ", a hard example, whose violation would be dropped with its projection"
+    else:
+        return
+    raise TypeError(
+        f"{role} is a coherent waveform generator, whose polarisations a detector receives by projection (a "
+        f"CBCGenerator, a WNBGenerator...), not an object of type {type(generator).__name__}{why}."
+    )
+
+
 class IncoherentGenerator(WaveformGenerator):
     """
     One injection with its own waveform in each detector: component j's
     polarisations are projected onto detector j alone, so its network has
-    as many detectors as it has components. Its components are held as a
-    tuple, and each is checked to be a waveform generator, neither an
-    IncoherentGenerator nor a hard example (one with a violation), as they
+    as many detectors as it has components. Its components, given as a list
+    (a single generator in its place is refused by name), are held as a
+    tuple, and each is checked to be a coherent waveform generator, neither
+    an IncoherentGenerator nor a hard example (one with a violation), as they
     are assigned, when it is built or after, as its network is.
 
     The components are one signal: one presence (drawn once, from this
@@ -1609,22 +1633,16 @@ class IncoherentGenerator(WaveformGenerator):
         # draws for several detectors of its own, cannot be projected onto one; a hard example's violation would be
         # dropped with its projection; and a network of another size would broadcast components onto the wrong
         # detectors.
+        if isinstance(component_generators, WaveformGenerator):
+            raise TypeError(
+                "An IncoherentGenerator takes a list of component generators, one for each detector, not a single "
+                f"{type(component_generators).__name__}: one waveform in every detector is that generator alone."
+            )
         component_generators = tuple(component_generators)
         if not component_generators:
             raise ValueError("An IncoherentGenerator needs a component generator for each detector.")
         for component in component_generators:
-            if not isinstance(component, WaveformGenerator) or isinstance(component, IncoherentGenerator):
-                raise TypeError(
-                    f"An IncoherentGenerator's component is a waveform generator whose signal one detector receives "
-                    f"(a WNBGenerator, a CBCGenerator...), not {component!r}: an IncoherentGenerator gives a waveform "
-                    f"to each of its own detectors."
-                )
-        if any(component.violation is not None for component in component_generators):
-            raise TypeError(
-                "An IncoherentGenerator's component is a coherent generator, not a hard example: its violation "
-                "(gf.HardExampleGenerator) would be dropped with its projection. A labelled mismatch is "
-                "gf.HardExampleGenerator with gf.MismatchedWaveforms."
-            )
+            _check_coherent(component, "An IncoherentGenerator's component")
         network = getattr(self, "_network", None)
         if network is not None:
             self._check_network_size(network, len(component_generators))
