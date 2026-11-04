@@ -1010,10 +1010,10 @@ class HardExampleGenerator(WaveformGenerator):
         that reach from a real arrival, which can lie anywhere there, so that
         range must be twice the reach wide for any signal of the generator:
         its longest put either side of its reference time, and for partial
-        signals, whose range narrows as a signal shortens, a point. Checked when a
-        dataset is built, and at every projection (``draw_projection``), where
-        the window meets the violation, so a gf.InjectionGenerator used alone
-        refuses it too.
+        signals, whose range narrows as a signal shortens, a point. Checked
+        when a dataset is built, and at every projection
+        (``draw_projection``), where the window meets the violation, so a
+        gf.InjectionGenerator used alone refuses it too.
         """
         reach = self.violation.reach_seconds(self.network)
         if reach > 0.0:

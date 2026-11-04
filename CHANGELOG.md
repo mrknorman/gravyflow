@@ -612,11 +612,11 @@ repository before it may need the changes below.
   holds `detector_geometry`'s float64 geometry; the projection, the delays and `DETECTOR_GEOMETRY` read it in float32,
   as a Network's projection does. A site slot's vertex is lal's to 3 mm (the rounding of lal's own angles). Batches with
   slots change by float32 rounding of their geometry (the geometry features by about 6e-8 to 7e-8, an injection's
-  per-detector SNR by about 1.4e-6 to 1.9e-6); batches of bundled detectors alone, with or without a drawn count of them, are unchanged, byte for
-  byte. A slot's specification now holds the version of those numerics (`DetectorSlot.GEOMETRY_NUMERICS`, 2), so the
-  fingerprint of every dataset with a slot changes, and a set materialised before is refused by name
-  (`FingerprintMismatch`), never served: materialise it again. A dataset of bundled detectors alone keeps its
-  fingerprint.
+  per-detector SNR by about 1.4e-6 to 1.9e-6); batches of bundled detectors alone, with or without a drawn count of
+  them, are unchanged, byte for byte. A slot's specification now holds the version of those numerics
+  (`DetectorSlot.GEOMETRY_NUMERICS`, 2), so the fingerprint of every dataset with a slot changes, and a set materialised
+  before is refused by name (`FingerprintMismatch`), never served: materialise it again. A dataset of bundled detectors
+  alone keeps its fingerprint.
 
 - **An incoherent generator is fingerprinted by its components.** `gf.IncoherentGenerator` inherits the generator base's
   dataclass fields but is built from its components, so a fingerprint read those fields alone: two incoherent generators
