@@ -92,18 +92,27 @@ class Violation:
     signals. A violation is a frozen dataclass of its parameters with its
     ``code``, and it acts only through the hooks below, each of which changes
     nothing by default: the hard example calls every hook and holds no case of
-    its own, so a new violation is one class. The base itself, and a class
-    that names no ``code``, is no violation and is refused by name.
+    its own, so a new violation is one class and its own code in
+    gf.ViolationCode. The base itself, a class that names no ``code``, and one
+    whose code is NONE, a real signal's, are no violation and are refused by
+    name.
     """
     code : ClassVar[ViolationCode]
 
     def __new__(cls, *args, **kwargs):
         # Here, not in __post_init__, so that a subclass's own __post_init__ cannot skip it.
-        if not isinstance(getattr(cls, "code", None), ViolationCode):
+        code = getattr(cls, "code", None)
+        if not isinstance(code, ViolationCode):
             raise TypeError(
                 f"{cls.__name__} names no code (a gf.ViolationCode), so it labels nothing: gf.Violation is the base "
                 "of the violations, not one. Use gf.WrongDelay, gf.MismatchedWaveforms or gf.TimeReversed, or give "
                 "a subclass its code."
+            )
+        if code is ViolationCode.NONE:
+            raise TypeError(
+                f"{cls.__name__}'s code is gf.ViolationCode.NONE, a real signal's, so every one of its examples "
+                "would be labelled a real signal. A violation labels its examples by a code of its own: a new kind "
+                "of violation adds its code to gf.ViolationCode."
             )
         return super().__new__(cls)
 

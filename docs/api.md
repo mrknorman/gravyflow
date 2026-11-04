@@ -142,7 +142,7 @@ are never mixed. Each preset's files ship with the package, pinned by sha256; th
 - `WrongDelay`: one present detector's copy shifted so that its delay from another present detector is the pair's light-travel time plus a drawn margin.
 - `MismatchedWaveforms`: a waveform of its own in each detector, differing in the named draws (parameters, or a burst's `noise`; never one that moves the signal's extent, a generator's `extent_attributes`) and, where only a burst's `noise` differs, correlating by an optional `correlation`.
 - `TimeReversed`: the waveform reversed in time about its reference time; only for a `CBCGenerator`, whose reversal leaves its family (`time_reversal_leaves_family`), and refused by name for every other generator.
-- `Violation`: the base of the violations, refused by name itself, as is a subclass that names no code; each acts only through its own hooks (what it checks, draws and changes in the projection), which `HardExampleGenerator` calls in every case.
+- `Violation`: the base of the violations, refused by name itself, as is a subclass that names no code or whose code is NONE, a real signal's; each acts only through its own hooks (what it checks, draws and changes in the projection), which `HardExampleGenerator` calls in every case.
 - `ViolationCode`: the codes `ReturnVariables.VIOLATION` gives: NONE 0, WRONG_DELAY 1, MISMATCHED_WAVEFORMS 2, TIME_REVERSED 3.
 - `WaveformParameter`: one waveform parameter and its label.
 - `WaveformParameters`: the waveform parameters a dataset can return.

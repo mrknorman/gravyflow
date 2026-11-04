@@ -737,7 +737,10 @@ def test_time_reversal_is_refused_where_it_stays_in_its_generators_family():
 
 
 def test_the_violation_base_and_a_violation_without_a_code_are_refused():
-    """gf.Violation is the base of the violations, not one: it, and a subclass that names no code, label nothing."""
+    """
+    gf.Violation is the base of the violations, not one: it, and a subclass that names no code, label nothing; a
+    subclass whose code is NONE would label its examples real signals.
+    """
     with pytest.raises(TypeError, match="Violation names no code .*the base of the violations"):
         gf.Violation()
 
@@ -747,6 +750,14 @@ def test_the_violation_base_and_a_violation_without_a_code_are_refused():
 
     with pytest.raises(TypeError, match="Uncoded names no code"):
         Uncoded()
+
+    # NONE is a real signal's code: a violation given it would label every one of its examples real.
+    @dataclasses.dataclass(frozen=True)
+    class Placeholder(gf.WrongDelay):
+        code = gf.ViolationCode.NONE
+
+    with pytest.raises(TypeError, match="Placeholder's code is gf.ViolationCode.NONE, a real signal's"):
+        Placeholder(0.01)
     with pytest.raises(TypeError, match="violation is a gf.Violation"):
         gf.HardExampleGenerator(wnb(), gf.Violation)
     # A subclass of a violation keeps its code, and pickles as it.

@@ -146,11 +146,12 @@ repository before it may need the changes below.
   reads them from it, and they fingerprint it beside its generator and violation. Its independent_waveforms,
   shape_attributes and extent_attributes are its generator's, and every check it makes of its generator, its scaling
   and its network runs wherever it is used: as its network is set (when it is built, and as a dataset binds it) and as
-  each batch is projected, since its generator may change after it is built. `gf.Violation`, the base, and a subclass
-  that names no code are refused by name. There is no one-detector violation (a signal in one detector
-  alone): a lone copy in one detector is reachable by a real source near the other detectors' nulls, with no margin
-  at the noise level for networks of up to four detectors, so it cannot be labelled a violation. A model's behaviour
-  on one detector is tested with networks of one present detector (`gf.Detectors`' `num_present` from 1).
+  each batch is projected, since its generator may change after it is built. `gf.Violation`, the base, a subclass
+  that names no code, and one whose code is NONE, which would label its examples real signals, are refused by name.
+  There is no one-detector violation (a signal in one detector alone): a lone copy in one detector is reachable by a
+  real source near the other detectors' nulls, with no margin at the noise level for networks of up to four
+  detectors, so it cannot be labelled a violation. A model's behaviour on one detector is tested with networks of one
+  present detector (`gf.Detectors`' `num_present` from 1).
 
 - **Hard examples: a wrong delay.** `gf.WrongDelay(margin_seconds)` shifts one present detector's copy so that its
   delay from another present detector, the example's own pair, is their light-travel time plus a margin drawn per
