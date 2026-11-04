@@ -170,9 +170,7 @@ class WrongDelay(Violation):
 
     The margin is exact for the drawn pair only. The shifted copy's delay from
     each other present detector is what it is: it may exceed that pair's
-    light travel by more than the margin (by more than the largest margin in
-    about a quarter of examples, for margins of 2 to 20 ms on networks of two
-    to four detectors drawn on the sphere), or lie within it. So the margin is
+    light travel by more than the margin, or lie within it. So the margin is
     a lower bound on the largest violation an example shows, and a margin
     drawn smaller (a harder example, as a curriculum would draw it) sets that
     bound, not the violation every pair sees.
@@ -184,11 +182,8 @@ class WrongDelay(Violation):
     signal in the window unless the generator allows partial signals), by
     its direction: the drawn one, or the other where only that keeps it
     there. So the copy reaches no part of the window a real arrival does not,
-    though its density near the range's edges is not a real arrival's: a
-    real arrival shifted by the reach either way spreads wider, so for a
-    0.1 s burst in a 1 s window on H1, L1 and V1, with margins of 2 to 10 ms,
-    0.8 to 1.0 % of copies lie within 10 ms of the range's edges, against
-    0.27 % of real arrivals. A range narrower than twice the farthest shift (the network's longest
+    though its density near the range's edges need not be a real arrival's.
+    A range narrower than twice the farthest shift (the network's longest
     light travel plus the largest margin), for the generator's longest
     signal, cannot hold the copy whatever the placement and is refused by
     name when the dataset is built.
