@@ -1548,9 +1548,10 @@ class IncoherentGenerator(WaveformGenerator):
     """
     One injection with its own waveform in each detector: component j's
     polarisations are projected onto detector j alone, so its network has
-    as many detectors as it has components. Its components, coherent
-    generators and never hard examples, are held as a tuple and checked as
-    they are assigned, when it is built or after, as its network is.
+    as many detectors as it has components. Its components are held as a
+    tuple, and each is checked to be a waveform generator, neither an
+    IncoherentGenerator nor a hard example (one with a violation), as they
+    are assigned, when it is built or after, as its network is.
 
     The components are one signal: one presence (drawn once, from this
     generator's ``chance`` stream, with its injection_chance), one placement,
@@ -1560,10 +1561,10 @@ class IncoherentGenerator(WaveformGenerator):
     allow_partially_out_of_window and network are component 0's when it is
     built, its sky and reference time the base's defaults; a component's own
     are not read. It compares, as it fingerprints, by those and its
-    components (``specification``). HRSS and
-    HPEAK measure the whole injection: the root-sum-square over the
-    detectors, and the loudest detector's peak. Each component draws its
-    waveform from its own streams (``comp/{j}``).
+    components (``specification``). HRSS and HPEAK measure the whole
+    injection: the root-sum-square over the detectors, and the loudest
+    detector's peak. Each component draws its waveform from its own streams
+    (``comp/{j}``).
 
     ``generate`` returns (Batch, Detectors, 2, Time) polarisations and one
     value per example for each parameter: the components' common value, NaN
@@ -1604,11 +1605,20 @@ class IncoherentGenerator(WaveformGenerator):
 
     @component_generators.setter
     def component_generators(self, component_generators):
-        # Checked on every assignment, not only when it is built: a hard example's violation would be dropped with
-        # its projection, and a network of another size would broadcast components onto the wrong detectors.
+        # Checked on every assignment, not only when it is built: a component that is no waveform generator, or
+        # draws for several detectors of its own, cannot be projected onto one; a hard example's violation would be
+        # dropped with its projection; and a network of another size would broadcast components onto the wrong
+        # detectors.
         component_generators = tuple(component_generators)
         if not component_generators:
             raise ValueError("An IncoherentGenerator needs a component generator for each detector.")
+        for component in component_generators:
+            if not isinstance(component, WaveformGenerator) or isinstance(component, IncoherentGenerator):
+                raise TypeError(
+                    f"An IncoherentGenerator's component is a waveform generator whose signal one detector receives "
+                    f"(a WNBGenerator, a CBCGenerator...), not {component!r}: an IncoherentGenerator gives a waveform "
+                    f"to each of its own detectors."
+                )
         if any(component.violation is not None for component in component_generators):
             raise TypeError(
                 "An IncoherentGenerator's component is a coherent generator, not a hard example: its violation "

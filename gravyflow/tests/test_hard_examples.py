@@ -967,6 +967,21 @@ def test_a_hard_examples_distributed_attributes_are_its_generators():
     assert hard.specification()["distributed_attributes"] == ringdown().distributed_attributes
 
 
+def test_an_incoherent_generators_components_are_waveform_generators():
+    """
+    Each component is refused by name, when it is built or assigned after, unless it is a waveform generator whose
+    signal one detector receives: not another object, and not an IncoherentGenerator, which gives detectors of its own.
+    """
+    incoherent = gf.IncoherentGenerator([wnb(), wnb()])
+    for bad in (object(), "wnb", gf.IncoherentGenerator([wnb(), wnb()])):
+        for components in ([wnb(), bad], [bad, wnb()]):
+            with pytest.raises(TypeError, match="An IncoherentGenerator's component is a waveform generator"):
+                gf.IncoherentGenerator(components)
+            with pytest.raises(TypeError, match="An IncoherentGenerator's component is a waveform generator"):
+                incoherent.component_generators = components
+    assert incoherent == gf.IncoherentGenerator([wnb(), wnb()])
+
+
 def test_the_usable_violations_are_named_by_their_code():
     """
     A refusal of what is no violation names the violations a hard example takes, every subclass of gf.Violation with
