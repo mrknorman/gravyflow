@@ -814,7 +814,6 @@ class HardExampleGenerator(WaveformGenerator):
             *WaveformGenerator.sky_attributes, "reference_gps_time_seconds",
         ):
             setattr(self, attribute, getattr(generator, attribute))
-        self.distributed_attributes = generator.distributed_attributes
         # Its network is set last, so the checks it runs (``_check``) see the rest.
         self.network = generator.network
 
@@ -860,6 +859,11 @@ class HardExampleGenerator(WaveformGenerator):
     def shape_attributes(self) -> Tuple[str, ...]:
         """Its generator's, whose draws it makes."""
         return self.generator.shape_attributes
+
+    @property
+    def distributed_attributes(self) -> Optional[Tuple[str, ...]]:
+        """Its generator's, whose draws it makes."""
+        return self.generator.distributed_attributes
 
     @property
     def extent_attributes(self) -> Tuple[str, ...]:

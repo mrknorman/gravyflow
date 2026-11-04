@@ -914,6 +914,18 @@ def test_a_generator_built_from_others_is_equal_by_its_specification():
         assert incoherent != other, other
 
 
+def test_a_hard_examples_distributed_attributes_are_its_generators():
+    """
+    It declares the draws its generator makes by reading them from the generator, as its other declarations are,
+    so a generator assigned after it is built declares its own, in the specification too.
+    """
+    hard = gf.HardExampleGenerator(wnb(), gf.WrongDelay(0.01))
+    assert hard.distributed_attributes == wnb().distributed_attributes
+    hard.generator = ringdown()
+    assert hard.distributed_attributes == ringdown().distributed_attributes != wnb().distributed_attributes
+    assert hard.specification()["distributed_attributes"] == ringdown().distributed_attributes
+
+
 def test_the_usable_violations_are_named_by_their_code():
     """
     A refusal of what is no violation names the violations a hard example takes, every subclass of gf.Violation with
