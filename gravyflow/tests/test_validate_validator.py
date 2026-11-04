@@ -272,13 +272,20 @@ def test_the_efficiency_set_size_is_checked_and_fingerprinted_only_when_set():
 
     assert ValidationConfig(num_examples=64).num_efficiency_injections == 64
     assert ValidationConfig(num_examples=64, efficiency_num_injections=8).num_efficiency_injections == 8
-    for bad in (0, -1):
-        with pytest.raises(ValueError, match="efficiency_num_injections must be >= 1"):
-            ValidationConfig(efficiency_num_injections=bad)
     default = ValidationConfig()
     assert "efficiency_num_injections" not in canonical(default)
     assert canonical(ValidationConfig(efficiency_num_injections=8))["efficiency_num_injections"] == 8
     assert config_fingerprint(ValidationConfig(efficiency_num_injections=8)) != config_fingerprint(default)
+
+
+@pytest.mark.parametrize("name", ["efficiency_num_injections", "volume_num_injections"])
+def test_an_injection_sets_size_is_a_whole_number(name):
+    # One check for both sets' sizes: a non-integer, which failed later in a slice, a bool (True was taken as 1),
+    # and a count below 1 are refused by name; a NumPy integer is a count.
+    for bad in (2.5, 8.0, True, False, "8", 0, -1):
+        with pytest.raises(ValueError, match=f"{name} must be an integer >= 1, got {bad!r}"):
+            ValidationConfig(**{name: bad})
+    assert getattr(ValidationConfig(**{name: np.int64(8)}), name) == 8
 
 
 def reach_of(dataset_args, masses=None, spins=None, **settings):

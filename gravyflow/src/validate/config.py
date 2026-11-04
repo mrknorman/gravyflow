@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 import json
 import logging
+import numbers
 from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -169,8 +170,10 @@ class ValidationConfig:
         if not hi > lo:
             raise ValueError(f"snr_range must be increasing, got {self.snr_range}.")
         for name in ("efficiency_num_injections", "volume_num_injections"):
-            if getattr(self, name) is not None and getattr(self, name) < 1:
-                raise ValueError(f"{name} must be >= 1, got {getattr(self, name)}.")
+            # A count: a float would fail later, in a slice, and True would be taken as 1.
+            size = getattr(self, name)
+            if size is not None and (isinstance(size, bool) or not isinstance(size, numbers.Integral) or size < 1):
+                raise ValueError(f"{name} must be an integer >= 1, got {size!r}.")
         if self.volume_reach_mpc is not None and not self.volume_reach_mpc > 0:
             raise ValueError(f"volume_reach_mpc must be > 0, got {self.volume_reach_mpc}.")
         self.interval_sigmas = tuple(float(s) for s in self.interval_sigmas)
