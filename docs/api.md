@@ -264,7 +264,9 @@ validates as it trains: they need the `viz` extra.
   training-period flag), at the levels `FAR_LEVELS_HZ` (one per month, year, ten and hundred years). The dashboard's
   tabs: Summary, Efficiency, Volume, ROC and false alarms, Parameter Space, Real events and the worst cases.
 - `ValidationConfig`: the settings of a validation (`mode`, `stride_seconds`, `cluster_seconds`,
-  `found_window_seconds`, `stream_segment_seconds`, `injection_stretch_seconds` for stream mode).
+  `found_window_seconds`, `stream_segment_seconds`, `injection_stretch_seconds` for stream mode); the noise
+  background's `num_examples` windows, and the efficiency and volume sets' sizes, `efficiency_num_injections` and
+  `volume_num_injections`, each by default `num_examples`.
 - Wrapping time slides and the per-detector path (`gravyflow.src.validate`): `WrappedSlides` lays the network's
   segments end to end as one ring and reads detector j `j lag` further round it in each slide, wrapping round each
   segment and across segments, so every slide adds the whole ring of background (`background_seconds`) and a 30-day

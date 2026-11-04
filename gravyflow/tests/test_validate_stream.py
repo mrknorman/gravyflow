@@ -159,6 +159,18 @@ def test_a_local_injection_scores_as_the_whole_stream_with_it_added(dataset_args
     assert changed == num, "the injections should change the scores of the windows they reach"
 
 
+def test_the_efficiency_set_has_a_size_of_its_own_in_stream_mode(dataset_args):
+    # efficiency_num_injections sizes stream mode's efficiency set too, and leaves the background's num_examples
+    # windows alone.
+    config = ValidationConfig(num_examples=64, batch_size=32, snr_range=(0.0, 15.0), stream_segment_seconds=64.0,
+                              efficiency_num_injections=8)
+    bank = ValidationBank(logit_model(), dataset_args, config)
+    bank.generate_stream_noise()
+    bank.generate_stream_injections()
+    assert bank.far_scores.shape == (64,)
+    assert bank.efficiency and all(np.shape(value)[0] == 8 for value in bank.efficiency.values())
+
+
 def test_the_stride_is_the_models_own_when_given(dataset_args):
     config = ValidationConfig(num_examples=40, batch_size=20, stride_seconds=0.125, stream_segment_seconds=64.0)
     bank = ValidationBank(logit_model(), dataset_args, config)

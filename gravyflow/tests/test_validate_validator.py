@@ -250,6 +250,37 @@ def test_the_reach_is_the_populations_and_can_be_set(dataset_args):
         ValidationConfig(mode="window", volume_reach_mpc=0.0)
 
 
+def test_the_efficiency_set_has_a_size_of_its_own(dataset_args):
+    # efficiency_num_injections (default num_examples) sizes the efficiency set alone: a smaller set is the first
+    # injections of the default one, whatever the noise background's num_examples.
+    def efficiency(**settings):
+        bank = ValidationBank(logit_model(1), dataset_args,
+                              ValidationConfig(mode="window", **{"num_examples": 64, "batch_size": 32, **settings}))
+        bank.generate()
+        return bank.efficiency
+
+    default, small = efficiency(), efficiency(efficiency_num_injections=32)
+    assert set(small) == set(default) and all(value.shape[0] == 64 for value in default.values())
+    for key in default:
+        np.testing.assert_array_equal(small[key], default[key][:32], err_msg=key)
+
+
+def test_the_efficiency_set_size_is_checked_and_fingerprinted_only_when_set():
+    # Refused below 1 as the volume set's is; unset, it is num_examples and left out of the configuration's
+    # fingerprint, so a configuration that does not set it fingerprints as before the setting existed.
+    from gravyflow.src.utils.fingerprint import canonical, config_fingerprint
+
+    assert ValidationConfig(num_examples=64).num_efficiency_injections == 64
+    assert ValidationConfig(num_examples=64, efficiency_num_injections=8).num_efficiency_injections == 8
+    for bad in (0, -1):
+        with pytest.raises(ValueError, match="efficiency_num_injections must be >= 1"):
+            ValidationConfig(efficiency_num_injections=bad)
+    default = ValidationConfig()
+    assert "efficiency_num_injections" not in canonical(default)
+    assert canonical(ValidationConfig(efficiency_num_injections=8))["efficiency_num_injections"] == 8
+    assert config_fingerprint(ValidationConfig(efficiency_num_injections=8)) != config_fingerprint(default)
+
+
 def reach_of(dataset_args, masses=None, spins=None, **settings):
     """The validator's reach for the example population, its component masses (low, high) and aligned spins as given."""
     args = deepcopy(dataset_args)

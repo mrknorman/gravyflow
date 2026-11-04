@@ -28,6 +28,12 @@ class UnfingerprintableError(TypeError):
     """A configuration value has no content a fingerprint can read."""
 
 
+#: A dataclass field's metadata key (``field(metadata={OMITTED_WHEN_NONE: True})``): the field is left out of the
+#: canonical form where it is None. It marks a setting added after fingerprints were kept whose None is the
+#: behaviour from before it, so a value that leaves it unset fingerprints as it did before the field existed.
+OMITTED_WHEN_NONE = "fingerprint_omitted_when_none"
+
+
 def canonical(value: Any) -> Any:
     """
     A JSON-ready canonical form of a configuration value.
@@ -35,7 +41,8 @@ def canonical(value: Any) -> Any:
     An object with a ``specification()`` method (the data obtainers) is kept by what
     that returns: everything that determines the data it serves. Dataclasses,
     mappings, sequences, enums (by qualified name), numpy scalars and arrays, and
-    paths are kept by content. Any other object is refused
+    paths are kept by content; a dataclass field marked `OMITTED_WHEN_NONE` is
+    left out where it is None. Any other object is refused
     (``UnfingerprintableError``): a fingerprint that read only its type would not
     change when its content did; nor would one that read a function's name when
     its code changed, so a callable is kept only as a dataclass or by its
@@ -46,7 +53,8 @@ def canonical(value: Any) -> Any:
         return {"__type__": type(value).__qualname__, **canonical(value.specification())}
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return {"__type__": type(value).__qualname__,
-                **{f.name: canonical(getattr(value, f.name)) for f in dataclasses.fields(value)}}
+                **{f.name: canonical(getattr(value, f.name)) for f in dataclasses.fields(value)
+                   if not (f.metadata.get(OMITTED_WHEN_NONE) and getattr(value, f.name) is None)}}
     if isinstance(value, type):
         return f"{value.__module__}.{value.__qualname__}"
     if isinstance(value, enum.Enum):

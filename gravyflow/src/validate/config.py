@@ -7,6 +7,8 @@ import numpy as np
 
 import gravyflow as gf
 
+from gravyflow.src.utils.fingerprint import OMITTED_WHEN_NONE
+
 from .provenance import StaleCheckpointError
 
 #: The validator's modes (`ValidationConfig.mode`): the default, then the one kept for compatibility.
@@ -37,6 +39,11 @@ class ValidationConfig:
     snr_range: Tuple[float, float] = (0.0, 20.0)
     snr_bin_width: float = 1.0
     num_worst_per_bin: int = 5
+    # The efficiency set's size (default num_examples), in either mode: a curve at a few
+    # SNRs rarely needs as many injections as the false-alarm background needs noise
+    # windows. Unset, it is left out of the fingerprint, which is then what it was before
+    # the setting existed.
+    efficiency_num_injections: Optional[int] = field(default=None, metadata={OMITTED_WHEN_NONE: True})
 
     # Target false-alarm rates (Hz) for the efficiency curves.
     far_thresholds: List[float] = field(
@@ -161,8 +168,9 @@ class ValidationConfig:
         lo, hi = self.snr_range
         if not hi > lo:
             raise ValueError(f"snr_range must be increasing, got {self.snr_range}.")
-        if self.volume_num_injections is not None and self.volume_num_injections < 1:
-            raise ValueError(f"volume_num_injections must be >= 1, got {self.volume_num_injections}.")
+        for name in ("efficiency_num_injections", "volume_num_injections"):
+            if getattr(self, name) is not None and getattr(self, name) < 1:
+                raise ValueError(f"{name} must be >= 1, got {getattr(self, name)}.")
         if self.volume_reach_mpc is not None and not self.volume_reach_mpc > 0:
             raise ValueError(f"volume_reach_mpc must be > 0, got {self.volume_reach_mpc}.")
         self.interval_sigmas = tuple(float(s) for s in self.interval_sigmas)
@@ -191,6 +199,11 @@ class ValidationConfig:
     def stream_cluster_seconds(self) -> float:
         """Stream mode's clustering: ``cluster_seconds``, else `STREAM_CLUSTER_SECONDS`."""
         return STREAM_CLUSTER_SECONDS if self.cluster_seconds is None else float(self.cluster_seconds)
+
+    @property
+    def num_efficiency_injections(self) -> int:
+        """The size of the efficiency set: ``efficiency_num_injections``, else ``num_examples``."""
+        return self.num_examples if self.efficiency_num_injections is None else self.efficiency_num_injections
 
     @property
     def num_volume_injections(self) -> int:

@@ -404,8 +404,12 @@ class ValidationBank:
         return deepcopy(generators[0])
 
     def generate(self) -> None:
-        """Score injections (every example injected, SNR uniform over the range)."""
+        """
+        Score the efficiency set: ``num_efficiency_injections`` injections (every
+        example injected, SNR uniform over the range).
+        """
         cfg = self.config
+        num_injections = cfg.num_efficiency_injections
         generator = self._generator()
         # At network SNR over the range, whatever the generator was trained to scale by.
         generator.scaling_method = gf.ScalingMethod(
@@ -419,12 +423,12 @@ class ValidationBank:
                   if k not in _CBC_LABELS or isinstance(generator, gf.CBCGenerator)}
         outputs = [gf.ReturnVariables.WHITENED_ONSOURCE, gf.ReturnVariables.WHITENED_INJECTIONS,
                    *labels.values()]
-        dataset = self.stage_dataset("inj", [generator], outputs)
+        dataset = self.stage_dataset("inj", [generator], outputs, num_examples=num_injections)
 
         edges = cfg.snr_bin_edges
         worst: List[list] = [[] for _ in range(edges.size - 1)]
         columns: Dict[str, list] = {k: [] for k in ("scores", "gps_times", *labels)}
-        for b in tqdm(range(self._num_batches()), desc="Scoring injections", unit="batch"):
+        for b in tqdm(range(self._num_batches(num_injections)), desc="Scoring injections", unit="batch"):
             x, y = dataset[b]
             batch_scores = self._score(x)
             n = batch_scores.size
@@ -445,8 +449,7 @@ class ValidationBank:
                 elif key > heap[0][0]:
                     heapq.heapreplace(heap, (key, _extract_sample_data(x, y, i, float(s))))
 
-        n_total = cfg.num_examples
-        self.efficiency = {k: np.concatenate(v)[:n_total] for k, v in columns.items() if v}
+        self.efficiency = {k: np.concatenate(v)[:num_injections] for k, v in columns.items() if v}
         self._worst_false_negatives = {
             f"{edges[i]:g}-{edges[i + 1]:g}": [s for _, s in sorted(heap, key=lambda t: t[0], reverse=True)]
             for i, heap in enumerate(worst)
@@ -1232,8 +1235,8 @@ class ValidationBank:
 
     def generate_stream_injections(self) -> None:
         """
-        Stream mode's injection set: ``num_examples`` sources at SNR uniform over the
-        range, each scored locally in the background's streams (`_score_locally`).
+        Stream mode's efficiency set: ``num_efficiency_injections`` sources at SNR uniform
+        over the range, each scored locally in the background's streams (`_score_locally`).
         """
         cfg = self.config
         generator = self._generator()
@@ -1242,7 +1245,8 @@ class ValidationBank:
             type_=gf.ScalingTypes.SNR)
         labels = {k: v for k, v in _INJECTION_LABELS.items()
                   if k != "central_times" and (k not in _CBC_LABELS or isinstance(generator, gf.CBCGenerator))}
-        self.efficiency = self._score_locally("inj", generator, cfg.num_examples, labels, cfg.snr_bin_edges)
+        self.efficiency = self._score_locally("inj", generator, cfg.num_efficiency_injections, labels,
+                                              cfg.snr_bin_edges)
 
     def generate_stream_volume(self) -> None:
         """
