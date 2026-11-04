@@ -42,12 +42,13 @@ from keras import ops
 import gravyflow as gf
 from gravyflow.src.dataset.conditioning.detector import C, ExampleNetworks
 from gravyflow.src.dataset.features.injection import (
-    SIGNAL_EXTENT, IncoherentGenerator, WaveformGenerator, _common_values, _equal_by_specification,
+    SIGNAL_EXTENT, IncoherentGenerator, WaveformGenerator, _common_values,
     _narrowed_placement, _signal_extent, get_support_bounds,
 )
 from gravyflow.src.dataset.tools.snr import _spectrum_for
 from gravyflow.src.rng.consumers import check_name
 from gravyflow.src.rng.tree import BatchStreams
+from gravyflow.src.utils.fingerprint import equal_by_specification
 
 
 #: The least a wrong delay's margin may be, in seconds. The projection's delays
@@ -802,7 +803,8 @@ class HardExampleGenerator(WaveformGenerator):
     ``ReturnVariables.VIOLATION`` gives each example's ``violation.code``.
     """
 
-    __eq__ = _equal_by_specification
+    # The dataclass equality it would inherit compares the base's fields alone, which leave its parts out.
+    __eq__ = equal_by_specification
 
     def __init__(self, generator : WaveformGenerator, violation : Violation, name : Optional[str] = None):
         self.generator = generator

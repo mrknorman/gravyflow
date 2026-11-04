@@ -34,6 +34,7 @@ from typing import Any, Dict, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 
+from gravyflow.src.utils.fingerprint import equal_by_specification
 from gravyflow.src.utils.resample import whole_hertz
 from .gwosc_data import (
     GWOSC_RUNS, GWOSC_SAMPLE_RATES_HERTZ, GWOSC_STRAIN_DATASETS, UpsamplingRefused,
@@ -115,8 +116,7 @@ class DataSource(ABC):
     def specification(self) -> Dict[str, Any]:
         """Everything that determines the strain the source serves (fingerprints read it)."""
 
-    def __eq__(self, other) -> bool:
-        return type(self) is type(other) and self.specification() == other.specification()
+    __eq__ = equal_by_specification
 
     def __hash__(self) -> int:
         return hash(type(self).__qualname__)

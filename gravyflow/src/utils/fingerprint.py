@@ -98,6 +98,19 @@ def config_fingerprint(*values: Any) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+def equal_by_specification(self, other) -> bool:
+    """
+    Equality of a value known by its ``specification()``, as a class's
+    ``__eq__``: equal to another of its type exactly when their fingerprints
+    (`config_fingerprint`) are, so it compares as it fingerprints;
+    NotImplemented for another type. A class that is hashed too gives a hash
+    that equal fingerprints share.
+    """
+    if type(self) is not type(other):
+        return NotImplemented
+    return config_fingerprint(self) == config_fingerprint(other)
+
+
 #: The libraries, besides gravyflow, whose code produces a dataset's batch bytes: a
 #: release of any of them may change those bytes, so each one's version is part of a
 #: dataset's identity (`library_versions`).

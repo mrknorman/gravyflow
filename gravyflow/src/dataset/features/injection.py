@@ -25,6 +25,7 @@ import gravyflow as gf
 from gravyflow.src.utils.shapes import (
     BATCH, GENERATOR, IFO, SAMPLES, OFFSOURCE_SAMPLES, ANY
 )
+from gravyflow.src.utils.fingerprint import equal_by_specification
 from gravyflow.src.utils.tensor import replace_nan_and_inf_with_zero
 from gravyflow.src.rng import BatchStreams, SeedTree, check_name, resolve_streams
 from gravyflow.src.rng import platform
@@ -1543,16 +1544,6 @@ def _signal_extent(generator : WaveformGenerator, parameters, num_examples : int
                  for side in generator.get_signal_extent_seconds(parameters))
 
 
-def _equal_by_specification(self, other) -> bool:
-    """
-    Equality of a generator built from others (gf.IncoherentGenerator,
-    gf.HardExampleGenerator): by its specification, what fingerprints it. The
-    dataclass equality it would inherit compares the base's fields alone,
-    which leave its parts out.
-    """
-    return type(self) is type(other) and self.specification() == other.specification()
-
-
 class IncoherentGenerator(WaveformGenerator):
     """
     One injection with its own waveform in each detector: component j's
@@ -1584,7 +1575,8 @@ class IncoherentGenerator(WaveformGenerator):
     refused by name with it. A labelled mismatch is gf.HardExampleGenerator
     with gf.MismatchedWaveforms.
     """
-    __eq__ = _equal_by_specification
+    # The dataclass equality it would inherit compares the base's fields alone, which leave its components out.
+    __eq__ = equal_by_specification
 
     def __init__(self, component_generators, name : Optional[str] = None):
         self.component_generators = component_generators

@@ -914,6 +914,47 @@ def test_a_generator_built_from_others_is_equal_by_its_specification():
         assert incoherent != other, other
 
 
+def test_one_equality_by_specification_serves_every_value_known_by_it():
+    """
+    Hard examples, incoherent injections, strain sources and networks compare by one rule, as they fingerprint: equal
+    exactly when their fingerprints are, and NotImplemented against another type, so Python asks the other.
+    """
+    from gravyflow.src.utils.fingerprint import equal_by_specification
+
+    values = (gf.HardExampleGenerator(wnb(), gf.WrongDelay(0.01)), gf.IncoherentGenerator([wnb(), wnb()]),
+              gf.GWOSC(), gf.Network([gf.IFO.H1, gf.IFO.L1]))
+    for value in values:
+        assert type(value).__eq__ is equal_by_specification, type(value).__name__
+        for other in (wnb(), gf.LocalFrames(), object(), *(v for v in values if v is not value)):
+            assert value.__eq__(other) is NotImplemented, (value, other)
+            assert value != other
+
+
+def test_values_built_alike_on_networks_built_apart_are_equal():
+    """
+    A network compares, and hashes, by its geometry, as it fingerprints: so do generators built alike on networks
+    built apart, and a copy of one, which held a network of its own and compared unequal; other geometry differs.
+    """
+    import copy
+
+    from gravyflow.src.utils.fingerprint import config_fingerprint
+
+    H, L, V = gf.IFO.H1, gf.IFO.L1, gf.IFO.V1
+    network = gf.Network([H, L, V])
+    assert network == gf.Network([H, L, V]) and hash(network) == hash(gf.Network([H, L, V]))
+    assert network == copy.deepcopy(network)
+    for other in (gf.Network([H, L]), gf.Network([L, H, V])):
+        assert network != other
+    for build in (lambda: wnb(network=[H, L, V]),
+                  lambda: gf.HardExampleGenerator(wnb(network=[H, L, V]), gf.WrongDelay(0.01)),
+                  lambda: gf.IncoherentGenerator([wnb(network=[H, L, V]) for _ in range(3)])):
+        generator = build()
+        assert generator.network is not build().network
+        assert config_fingerprint(generator) == config_fingerprint(build())
+        assert generator == build() and copy.deepcopy(generator) == generator, type(generator).__name__
+    assert wnb(network=[H, L, V]) != wnb(network=[H, L])
+
+
 def test_a_hard_examples_distributed_attributes_are_its_generators():
     """
     It declares the draws its generator makes by reading them from the generator, as its other declarations are,

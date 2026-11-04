@@ -14,6 +14,7 @@ import jax
 import numpy as np
 from gravyflow.src.resources import RESOURCES
 from gravyflow.src.rng.consumers import check_name
+from gravyflow.src.utils.fingerprint import config_fingerprint, equal_by_specification
 from gravyflow.src.utils.tensor import rfftfreq
 
 import gravyflow as gf
@@ -662,7 +663,10 @@ class Network:
         Generator, such as a gf.SeedTree stream; required for random
         geometry); the Network then holds that fixed geometry. A Network is
         stateless geometry: it holds no random state, and ``project_wave``
-        takes every sky angle from its caller.
+        takes every sky angle from its caller. It compares, as it
+        fingerprints, by that geometry (``specification``), and hashes so:
+        networks built apart of one geometry are equal, as are generators
+        built alike on them.
         """
         def geometry_rng():
             if rng is None:
@@ -735,6 +739,11 @@ class Network:
         self.init_parameters(
             **arguments
         )
+
+    __eq__ = equal_by_specification
+
+    def __hash__(self) -> int:
+        return hash(config_fingerprint(self))
 
     def specification(self) -> Dict:
         """
