@@ -280,8 +280,9 @@ def test_the_efficiency_set_size_is_checked_and_fingerprinted_only_when_set():
 
 @pytest.mark.parametrize("name", ["efficiency_num_injections", "volume_num_injections"])
 def test_an_injection_sets_size_is_a_whole_number(name):
-    # One check for both sets' sizes: a non-integer, which failed later in a slice, a bool (True was taken as 1),
-    # and a count below 1 are refused by name; a NumPy integer is a count.
+    # One check for both sets' sizes: a non-integer (unchecked, the volume set's fails at its distance draw, the
+    # efficiency set's in a slice), a bool (the efficiency set would take True as 1) and a count below 1 are refused
+    # by name; a NumPy integer is a count.
     for bad in (2.5, 8.0, True, False, "8", 0, -1):
         with pytest.raises(ValueError, match=f"{name} must be an integer >= 1, got {bad!r}"):
             ValidationConfig(**{name: bad})

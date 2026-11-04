@@ -142,11 +142,12 @@ repository before it may need the changes below.
   many injections the efficiency set scores, in stream and window mode, so the noise background's `num_examples` windows
   no longer set it too: an efficiency curve at a few SNRs rarely needs as many injections as the false-alarm background
   needs noise windows. A smaller set is the first injections of the default one in window mode. It and
-  `volume_num_injections` are refused by name unless an integer of at least 1 (a non-integer volume set's size failed
-  later, in a slice, and `True` was taken as 1). It is the last of `ValidationConfig`'s settings, so no argument given
-  by position moves. Unset, it is left out of the configuration's fingerprint (`fingerprint.OMITTED_WHEN_NONE`, a
-  dataclass field's metadata), so every configuration that does not set it keeps its fingerprint, its stage datasets and
-  its results; set, it changes the fingerprint and the efficiency set's size alone.
+  `volume_num_injections` are refused by name unless an integer of at least 1 (before, a volume set's size that was no
+  integer, `True` among them, failed at its distance draw, by NumPy's `TypeError`). It is the last of
+  `ValidationConfig`'s settings, so no argument given by position moves. Unset, it is left out of the configuration's
+  fingerprint (`fingerprint.OMITTED_WHEN_NONE`, a dataclass field's metadata), so every configuration that does not set
+  it keeps its fingerprint, its stage datasets and its results; set, it changes the fingerprint and the efficiency set's
+  size alone.
 - **Hard examples.** `gf.HardExampleGenerator(generator, violation)` gives a generator's signals with one violation of
   what a detector network can receive from a real source, one of the three below. It draws as its generator does under
   its own name, and the injection layer places, projects, scales over the present detectors, crops and whitens it as the

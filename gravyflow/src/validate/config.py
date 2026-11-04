@@ -172,7 +172,8 @@ class ValidationConfig:
         if not hi > lo:
             raise ValueError(f"snr_range must be increasing, got {self.snr_range}.")
         for name in ("efficiency_num_injections", "volume_num_injections"):
-            # A count: a float would fail later, in a slice, and True would be taken as 1.
+            # A count, refused here by name: unchecked, a non-integer fails later (the volume set's at its distance
+            # draw, the efficiency set's in a slice), and the efficiency set takes True as 1.
             size = getattr(self, name)
             if size is not None and (isinstance(size, bool) or not isinstance(size, numbers.Integral) or size < 1):
                 raise ValueError(f"{name} must be an integer >= 1, got {size!r}.")
