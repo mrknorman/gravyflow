@@ -174,8 +174,7 @@ name), placement, SNR target over the present detectors, window and whitening. T
 travel plus the margin; `gf.MismatchedWaveforms(differ)`, a waveform of its own in each detector, differing in the named draws that change its shape but not its extent, which
 its one placement reads (a binary's masses or spins; a ringdown's, chirplet's or periodic wave's frequencies; a
 white-noise burst's noise), and balanced to one source's loudness; and `gf.TimeReversed()`, the
-waveform reversed in time, only for a binary or a ringdown, whose reversal is a waveform no source of their kind
-makes. `ReturnVariables.VIOLATION` (B, G) labels each generator's `gf.ViolationCode` (NONE, 0, for a real signal),
+waveform reversed in time, only for a binary, whose reversed chirp no binary makes. `ReturnVariables.VIOLATION` (B, G) labels each generator's `gf.ViolationCode` (NONE, 0, for a real signal),
 NaN where the generator injected nothing. A network of no more detectors than the independent waveforms a generator's
 polarisations carry (`independent_waveforms`: one for an aligned-spin binary, two for a precessing one or a
 white-noise burst of independent polarisations) receives any waveforms in them, so a wrong delay or a mismatch needs

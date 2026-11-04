@@ -47,6 +47,12 @@ def ringdown(**kwargs):
         "frequency_hertz": constant(100.0), "damping_time_seconds": constant(0.02), **kwargs})
 
 
+def binary(**kwargs):
+    return gf.CBCGenerator(**{
+        "scaling_method": gf.ScalingMethod(constant(TARGET_SNR), gf.ScalingTypes.SNR),
+        "mass_1_msun": uniform(20.0, 40.0), "mass_2_msun": uniform(20.0, 40.0), **kwargs})
+
+
 def dataset(generators, ifos=(gf.IFO.H1, gf.IFO.L1, gf.IFO.V1), seed=3, outputs=(), group="train"):
     return gf.Dataset(
         seed=seed, group=group,
@@ -81,7 +87,7 @@ def test_the_violations_draw_from_registered_streams():
 def test_a_real_signal_is_labelled_none_and_each_hard_example_its_violation():
     violations = [gf.WrongDelay(0.01), gf.MismatchedWaveforms(("noise",)), gf.TimeReversed()]
     generators = [wnb(name="real")] + [
-        gf.HardExampleGenerator(ringdown() if isinstance(violation, gf.TimeReversed) else wnb(), violation,
+        gf.HardExampleGenerator(binary() if isinstance(violation, gf.TimeReversed) else wnb(), violation,
                                 name=f"hard{j}") for j, violation in enumerate(violations)]
     _, y = dataset(generators)[0]
     expected = [gf.ViolationCode.NONE] + [violation.code for violation in violations]
@@ -97,8 +103,8 @@ def test_a_real_signal_is_labelled_none_and_each_hard_example_its_violation():
 def test_a_hard_example_draws_as_its_generator_under_its_own_name():
     """Reversed in time about its reference sample, a hard example's waveform is the generator's of its name."""
     streams = gf.SeedTree(2).batch("train", 0, 0).sub("wave/hard")
-    base = ringdown(name="hard")
-    reversed_ = gf.HardExampleGenerator(ringdown(), gf.TimeReversed(), name="hard")
+    base = binary(name="hard")
+    reversed_ = gf.HardExampleGenerator(binary(), gf.TimeReversed(), name="hard")
     waveforms, parameters = base.generate(BATCH, SAMPLE_RATE, 2.0, streams)
     reflected, reflected_parameters = reversed_.generate(BATCH, SAMPLE_RATE, 2.0, streams)
     waveforms, reflected = np.asarray(waveforms), np.asarray(reflected)
@@ -109,10 +115,10 @@ def test_a_hard_example_draws_as_its_generator_under_its_own_name():
     np.testing.assert_array_equal(reflected[..., 0], 0.0)
     for key, value in parameters.items():
         np.testing.assert_array_equal(np.asarray(reflected_parameters[key]), np.asarray(value), err_msg=str(key))
-    # The signal's extent is reversed with it: a ringdown's, all after its peak, falls all before it.
+    # The signal's extent is reversed with it.
     before, after = reversed_.get_signal_extent_seconds(reflected_parameters)
-    np.testing.assert_array_equal((before, after), base.get_signal_extent_seconds(parameters)[::-1])
-    assert np.all(before > 0.0) and np.all(after == 0.0)
+    expected = np.broadcast_to(np.float64(base.get_signal_extent_seconds(parameters)[::-1]).T, (BATCH, 2)).T
+    np.testing.assert_array_equal(np.stack([before, after]), expected)
 
 
 def test_a_time_reversed_chirp_rises_from_its_merger():
@@ -436,8 +442,8 @@ def test_a_hard_examples_fingerprint_is_its_generator_and_violation():
         (wnb(), gf.WrongDelay(0.01)), (wnb(), gf.WrongDelay(0.02)), (wnb(), gf.MismatchedWaveforms("noise")),
         (wnb(duration_seconds=constant(0.2)), gf.MismatchedWaveforms("noise")))}
     assert len(prints) == 4
-    assert canonical(gf.HardExampleGenerator(ringdown(), gf.TimeReversed())) == \
-        canonical(gf.HardExampleGenerator(ringdown(), gf.TimeReversed()))
+    assert canonical(gf.HardExampleGenerator(binary(), gf.TimeReversed())) == \
+        canonical(gf.HardExampleGenerator(binary(), gf.TimeReversed()))
 
 
 @pytest.mark.parametrize("setting", sorted(test_injection.CHANGED_SETTINGS))
@@ -667,7 +673,7 @@ def test_hard_examples_refuse_what_they_cannot_be():
             dataset([gf.HardExampleGenerator(wnb(), violation)],
                     ifos=gf.Detectors([gf.IFO.H1, gf.IFO.L1, gf.IFO.V1], num_present=uniform(2, 3, int)))
     # Reversal needs no second detector.
-    gf.HardExampleGenerator(ringdown(network=gf.Network([gf.IFO.H1])), gf.TimeReversed())
+    gf.HardExampleGenerator(binary(network=gf.Network([gf.IFO.H1])), gf.TimeReversed())
 
 
 def _forward_and_reversed(generator, seed=2, num_waveforms=1, **parameters):
@@ -714,45 +720,19 @@ def test_a_reversed_white_noise_burst_is_another_such_burst():
     np.testing.assert_allclose(np.abs(np.fft.rfft(backward[0], axis=-1)), spectrum, atol=1e-5 * spectrum.max())
 
 
-def _bin_energies(strain, width):
-    """The energy of ``strain`` (Batch, Time) in successive bins of ``width`` samples."""
-    usable = strain.shape[-1] // width * width
-    return np.sum(strain[:, :usable].reshape(strain.shape[0], -1, width) ** 2, axis=-1)
-
-
-def test_a_reversed_ringdown_rises_where_every_ringdown_decays():
-    """
-    Every ringdown, whatever its frequency, damping time, phase or polarisation and wherever it is placed, holds
-    less energy in each stretch of its support than in the one before; reversed, each holds more: no ringdown is
-    a reversed one, so a reversed ringdown is a waveform its generator never makes.
-    """
-    forward, backward = _forward_and_reversed(
-        gf.RingdownGenerator, num_waveforms=32, frequency_hertz=uniform(60.0, 120.0),
-        damping_time_seconds=uniform(0.02, 0.08), phase_radians=uniform(0.0, 2.0 * np.pi),
-        polarization_eccentricity=uniform(0.0, 1.0))
-    angles = np.random.default_rng(1).uniform(0.0, np.pi, (32, 1))
-    width = int(0.05 * SAMPLE_RATE)  # Three cycles or more of every ringdown here, well below the Nyquist frequency.
-    for waveforms, decays in ((forward, True), (backward, False)):
-        strain = np.cos(angles) * waveforms[:, 0] + np.sin(angles) * waveforms[:, 1]
-        for energies in _bin_energies(strain, width):
-            held = energies[energies > 1e-6 * energies.max()]
-            steps = np.diff(held)
-            assert len(held) >= 2 and np.all(steps < 0.0 if decays else steps > 0.0)
-
-
 def test_time_reversal_is_refused_where_it_stays_in_its_generators_family():
     """
     A hard example is never a real signal of its own generator: time reversal is accepted only by a generator
-    that declares its reversal leaves its family (a binary's chirp, a ringdown), and refused by name elsewhere.
+    that declares its reversal leaves its family (a binary's chirp), and refused by name elsewhere: a ringdown too,
+    whose reversed signal lies before its reference time, so it would not be placed as a ringdown's signals are.
     """
-    for generator in (wnb(), gf.SineGaussianGenerator(), gf.ChirpletGenerator(),
+    for generator in (wnb(), gf.SineGaussianGenerator(), gf.ChirpletGenerator(), gf.RingdownGenerator(),
                       *(gf.PeriodicWaveGenerator(wave_shape=shape) for shape in gf.WaveShape)):
-        with pytest.raises(ValueError, match="reversed in time"):
+        with pytest.raises(ValueError, match=f"leaves its family .*not a {type(generator).__name__}"):
             gf.HardExampleGenerator(generator, gf.TimeReversed())
-    for generator in (gf.CBCGenerator(), gf.RingdownGenerator()):
-        gf.HardExampleGenerator(generator, gf.TimeReversed())
+    gf.HardExampleGenerator(gf.CBCGenerator(), gf.TimeReversed())
     declared = {generator for generator in SHAPES if generator.time_reversal_leaves_family}
-    assert declared == {gf.CBCGenerator, gf.RingdownGenerator}
+    assert declared == {gf.CBCGenerator}
     assert not gf.WaveformGenerator.time_reversal_leaves_family
 
 
@@ -1019,7 +999,7 @@ STREAM_CASES = {
     "wrong delay": lambda: gf.HardExampleGenerator(wnb(), gf.WrongDelay(uniform(0.01, 0.02)), name="hard"),
     "mismatched": lambda: gf.HardExampleGenerator(wnb(), gf.MismatchedWaveforms("noise", correlation=uniform(0.2, 0.6)),
                                                   name="hard"),
-    "time reversed": lambda: gf.HardExampleGenerator(ringdown(), gf.TimeReversed(), name="hard"),
+    "time reversed": lambda: gf.HardExampleGenerator(binary(), gf.TimeReversed(), name="hard"),
 }
 
 

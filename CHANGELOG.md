@@ -178,10 +178,11 @@ repository before it may need the changes below.
   network SNR only.
 
 - **Hard examples: time reversed.** `gf.TimeReversed()` reverses the waveform about its reference time: a chirp no
-  binary makes, or a ringdown that rises into its peak and stops. It is taken only by a generator that declares its
-  reversal leaves its family (`time_reversal_leaves_family`: `gf.CBCGenerator` and `gf.RingdownGenerator`), and
-  refused by name for a sine-Gaussian, white-noise burst, periodic wave or chirplet, whose reversal is one of its own
-  waveforms.
+  binary makes. It is taken only by a generator that declares its reversal leaves its family
+  (`time_reversal_leaves_family`: `gf.CBCGenerator`), and refused by name for every other: a sine-Gaussian,
+  white-noise burst, periodic wave or chirplet, whose reversal is one of its own waveforms, and a ringdown, whose
+  reversed signal lies before its reference time where a ringdown's lies after it, so it would not be placed as the
+  generator's signals are.
 
 - **Hard examples: the networks that can hold one.** Each generator declares the independent waveforms its
   polarisations carry (`independent_waveforms`: 1 for an aligned-spin binary, sine-Gaussian, chirplet, ringdown or
