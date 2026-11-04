@@ -559,9 +559,10 @@ repository before it may need the changes below.
   base's dataclass fields but is built from its components, so a fingerprint read those fields alone: two incoherent
   generators that differed only in a component (a burst's duration in one detector) fingerprinted the same, and a set
   materialised for one could be served for the other. It now has a `specification()`: its own settings (the base's
-  fields: its scaling method, injection chance, padding, allow_partially_out_of_window, sky, reference time, name and
-  network, which the injection layer reads from it, component 0's when it is built) and its components, in detector
-  order, so a setting changed after it is built (as the validator changes them) changes its fingerprint too. The
+  fields, which the injection layer reads from it: its scaling method, injection chance, padding,
+  allow_partially_out_of_window and network, component 0's when it is built; its name, its own; its sky and reference
+  time, the base's defaults, since a component's are not read) and its components, in detector order, so a setting
+  changed after it is built (as the validator changes them) changes its fingerprint too. The
   fingerprint of every dataset with an incoherent generator changes, so a set materialised before is never served for
   it: materialise it again. Every other dataset keeps its fingerprint.
 

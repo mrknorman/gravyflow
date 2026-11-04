@@ -1255,8 +1255,8 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
                 if generator.violation is not None:
                     generator.check_window(self.onsource_duration_seconds)
                 # The generator's placement range in the window (padding None is
-                # as far as the window allows); a generator refuses a window it
-                # cannot place its signals in.
+                # as far as the window allows), warned of below where it
+                # reaches beyond the window.
                 low, high = generator.placement_range_seconds(self.onsource_duration_seconds)
 
                 # Condition: padding <= onsource / 2

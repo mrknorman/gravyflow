@@ -1509,9 +1509,10 @@ class IncoherentGenerator(WaveformGenerator):
     generator's ``chance`` stream, with its injection_chance), one placement,
     sky and scaling, one mask value per example. Those settings are this
     generator's own, the injection layer reads them from it, and they
-    fingerprint it: its scaling method, injection chance, padding and
-    allow_partially_out_of_window are component 0's when it is built, its sky
-    and reference time the base's defaults; a component's own are not read. HRSS and
+    fingerprint it: its scaling method, injection chance, padding,
+    allow_partially_out_of_window and network are component 0's when it is
+    built, its sky and reference time the base's defaults; a component's own
+    are not read. HRSS and
     HPEAK measure the whole injection: the root-sum-square over the
     detectors, and the loudest detector's peak. Each component draws its
     waveform from its own streams (``comp/{j}``).
