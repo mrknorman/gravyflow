@@ -1010,8 +1010,10 @@ class WNBGenerator(WaveformGenerator):
     extent_attributes : ClassVar[Tuple[str, ...]] = (
         "duration_seconds", "min_frequency_hertz", "max_frequency_hertz")
 
-    # Its content is noise, which repeats nowhere a window may cut it.
-    repeats_when_cut : ClassVar[bool] = False
+    @property
+    def repeats_when_cut(self) -> bool:
+        """False: its content is noise, which repeats nowhere a window may cut it."""
+        return False
 
     @property
     def independent_waveforms(self) -> int:

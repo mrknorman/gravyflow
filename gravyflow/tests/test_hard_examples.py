@@ -775,7 +775,7 @@ def test_a_hard_examples_declarations_are_its_generators():
     burst = gf.HardExampleGenerator(wnb(), gf.MismatchedWaveforms("noise"))
     assert burst.shape_attributes == gf.WNBGenerator.shape_attributes
     assert burst.extent_attributes == gf.WNBGenerator.extent_attributes
-    assert burst.repeats_when_cut is gf.WNBGenerator.repeats_when_cut is False
+    assert burst.repeats_when_cut is wnb().repeats_when_cut is False
     assert repr(hard) == f"HardExampleGenerator(generator={aligned!r}, violation=WrongDelay(margin_seconds=" \
         f"{gf.WrongDelay(0.005).margin_seconds!r}), name='late')"
 

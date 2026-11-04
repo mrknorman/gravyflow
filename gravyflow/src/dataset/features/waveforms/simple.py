@@ -159,8 +159,10 @@ class PeriodicWaveGenerator(gf.WaveformGenerator):
     shape_attributes: ClassVar[Tuple[str, ...]] = ("frequency_hertz", "duration_seconds")
     extent_attributes: ClassVar[Tuple[str, ...]] = ("duration_seconds",)
 
-    # Linearly polarised: the plus polarisation only.
-    independent_waveforms: ClassVar[int] = 1
+    @property
+    def independent_waveforms(self) -> int:
+        """1: it is linearly polarised, the plus polarisation only."""
+        return 1
 
     distributed_attributes: Tuple[str] = (
         "frequency_hertz",
@@ -278,9 +280,13 @@ class SineGaussianGenerator(gf.WaveformGenerator):
     # Its envelope's length, tau = Q / (sqrt(2) pi f), is both's.
     extent_attributes: ClassVar[Tuple[str, ...]] = ("frequency_hertz", "quality_factor")
 
-    # Its cross polarisation is its plus a quarter cycle on (envelope x sin
-    # beside envelope x cos), rescaled by the eccentricity.
-    independent_waveforms: ClassVar[int] = 1
+    @property
+    def independent_waveforms(self) -> int:
+        """
+        1: its cross polarisation is its plus a quarter cycle on (envelope x
+        sin beside envelope x cos), rescaled by the eccentricity.
+        """
+        return 1
 
     distributed_attributes: Tuple[str] = (
         "frequency_hertz",
@@ -404,9 +410,13 @@ class ChirpletGenerator(gf.WaveformGenerator):
         "start_frequency_hertz", "end_frequency_hertz", "duration_seconds")
     extent_attributes: ClassVar[Tuple[str, ...]] = ("duration_seconds",)
 
-    # Its cross polarisation is its plus a quarter cycle on (envelope x sin
-    # beside envelope x cos), rescaled by the eccentricity.
-    independent_waveforms: ClassVar[int] = 1
+    @property
+    def independent_waveforms(self) -> int:
+        """
+        1: its cross polarisation is its plus a quarter cycle on (envelope x
+        sin beside envelope x cos), rescaled by the eccentricity.
+        """
+        return 1
 
     @property
     def repeats_when_cut(self) -> bool:
@@ -535,9 +545,13 @@ class RingdownGenerator(gf.WaveformGenerator):
     shape_attributes: ClassVar[Tuple[str, ...]] = ("frequency_hertz", "damping_time_seconds")
     extent_attributes: ClassVar[Tuple[str, ...]] = ("damping_time_seconds",)
 
-    # Its cross polarisation is its plus a quarter cycle on (envelope x sin
-    # beside envelope x cos), rescaled by the eccentricity.
-    independent_waveforms: ClassVar[int] = 1
+    @property
+    def independent_waveforms(self) -> int:
+        """
+        1: its cross polarisation is its plus a quarter cycle on (envelope x
+        sin beside envelope x cos), rescaled by the eccentricity.
+        """
+        return 1
 
     distributed_attributes: Tuple[str] = (
         "frequency_hertz",
