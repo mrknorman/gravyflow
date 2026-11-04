@@ -138,7 +138,7 @@ are never mixed. Each preset's files ship with the package, pinned by sha256; th
 - `Approximant`: the CBC waveform models.
 - `WNBGenerator`: white-noise bursts.
 - `IncoherentGenerator`: a different waveform in each detector.
-- `HardExampleGenerator`: a generator's signals with one violation of what a network can receive from a real source, matched to the generator's own in everything else (draws, placement, SNR target over the present detectors, window, whitening); `ReturnVariables.VIOLATION` (B, G) labels each generator's kind, and `ReturnVariables.VIOLATION_DETECTORS` (B, G, IFO) the detectors whose copies carry it.
+- `HardExampleGenerator`: a generator's signals with one violation of what a network can receive from a real source, matched to the generator's own in everything else (draws, placement, SNR target over the present detectors, window, whitening); `ReturnVariables.VIOLATION` (B, G) labels each generator's kind. Each violation needs the present detectors it asks of the generator (`Violation.fewest_detectors`, from the generator's `independent_waveforms`), refused by name where a network can present fewer.
 - `WrongDelay`: one present detector's copy shifted so that its delay from another present detector is the pair's light-travel time plus a drawn margin.
 - `OneDetector`: the signal in exactly one present detector, which holds what the real signal gives it there (the network SNR is that detector's alone).
 - `MismatchedWaveforms`: a waveform of its own in each detector, differing in the named draws (parameters, or a burst's `noise`; never one that moves the signal's extent, a generator's `extent_attributes`) and, where only a burst's `noise` differs, correlating by an optional `correlation`.

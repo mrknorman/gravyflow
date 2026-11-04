@@ -364,17 +364,6 @@ class ReturnVariables(Enum):
     # names no violation.
     VIOLATION = ReturnVariable(28, (BATCH, GENERATOR))
 
-    # Which detectors' copies carry that violation: 1 in each, 0 in the
-    # others (a detector absent from the example's network among them), so a
-    # label per detector or per pair needs no sky to re-derive it. A real
-    # signal: none. gf.WrongDelay: the shifted detector alone (its partner
-    # keeps a real arrival). gf.OneDetector: the one detector that holds the
-    # signal, which no other detector sees. gf.MismatchedWaveforms and
-    # gf.TimeReversed: every present detector, each holding a waveform of its
-    # own, or the reversed one. NaN where the generator injected nothing, as
-    # VIOLATION is.
-    VIOLATION_DETECTORS = ReturnVariable(29, (BATCH, GENERATOR, IFO))
-
     def __lt__(self, other):
         return self.value.index < other.value.index
 
@@ -1514,9 +1503,9 @@ class IncoherentGenerator(WaveformGenerator):
     detectors hold bursts of different durations has no one duration).
 
     It is no real signal, but no hard example either: whether its components
-    differ, and in what, is not checked, so ReturnVariables.VIOLATION and
-    VIOLATION_DETECTORS are refused by name with it. A labelled mismatch is
-    gf.HardExampleGenerator with gf.MismatchedWaveforms.
+    differ, and in what, is not checked, so ReturnVariables.VIOLATION is
+    refused by name with it. A labelled mismatch is gf.HardExampleGenerator
+    with gf.MismatchedWaveforms.
     """
     component_generators : List[WaveformGenerator]
 
@@ -1524,6 +1513,12 @@ class IncoherentGenerator(WaveformGenerator):
         self.component_generators = list(component_generators)
         if not self.component_generators:
             raise ValueError("An IncoherentGenerator needs a component generator for each detector.")
+        if any(component.violation is not None for component in self.component_generators):
+            raise TypeError(
+                "An IncoherentGenerator's component is a coherent generator, not a hard example: its violation "
+                "(gf.HardExampleGenerator) would be dropped with its projection. A labelled mismatch is "
+                "gf.HardExampleGenerator with gf.MismatchedWaveforms."
+            )
         self.name = None if name is None else check_name(name, "generator name")
         first = self.component_generators[0]
         self.scaling_method = first.scaling_method
@@ -1770,10 +1765,6 @@ def _stack_generator_labels(labels_list):
                 [ops.full_like(like, np.nan) if value is None else value for value in values], axis=0
             )
     return stacked
-
-# The labels of what each signal is (gf.HardExampleGenerator), made beside its
-# projection.
-VIOLATION_LABELS = (ReturnVariables.VIOLATION, ReturnVariables.VIOLATION_DETECTORS)
 
 # Keys of the source measures InjectionGenerator records with each batch.
 SOURCE_HRSS = "source_hrss"
@@ -2105,9 +2096,7 @@ class InjectionGenerator:
                   the others (HRSS and HPEAK in physical strain; SNR by the
                   measure SNR scaling uses);
                 - CENTRAL_TIME, when requested: (Generators, Batch, IFOs);
-                - VIOLATION, when requested: each generator's gf.ViolationCode;
-                - VIOLATION_DETECTORS, when requested: (Generators, Batch,
-                  IFOs), 1 where the detector's copy carries the violation.
+                - VIOLATION, when requested: each generator's gf.ViolationCode.
 
         Hard examples (gf.HardExampleGenerator): a violation that changes the
         projection (a wrong delay, one detector) is drawn here, from the
@@ -2264,7 +2253,7 @@ class InjectionGenerator:
 
             # A hard example's change to the projection: each copy's shift
             # beyond its delay, and the detectors that keep the signal.
-            violation_shifts, violation_kept, violation_carriers = (None, None, None) \
+            violation_shifts, violation_kept = (None, None) \
                 if generator.violation is None else generator.draw_projection(
                     network, time_delays, generator_streams, label, num_inj,
                     offsets_seconds=shift_seconds,
@@ -2294,22 +2283,11 @@ class InjectionGenerator:
 
                 generator_labels[ReturnVariables.CENTRAL_TIME] = normalized_time
 
-            # What the signal is, and which detectors' copies carry it.
-            asked = [variable for variable in VIOLATION_LABELS
-                     if parameters_to_return and variable in parameters_to_return]
-            if asked and isinstance(generator, IncoherentGenerator):
-                raise ValueError(
-                    f"An IncoherentGenerator gives each detector a waveform of its own, which no real signal "
-                    f"does, but it is no hard example whose violation is known: {', '.join(v.name for v in asked)} "
-                    "cannot label it. Use gf.HardExampleGenerator with gf.MismatchedWaveforms, or leave it out."
-                )
-            if ReturnVariables.VIOLATION in asked:
+            # What the signal is (an IncoherentGenerator's is refused when the
+            # dataset is built).
+            if parameters_to_return and ReturnVariables.VIOLATION in parameters_to_return:
                 code = 0 if generator.violation is None else int(generator.violation.code)
                 generator_labels[ReturnVariables.VIOLATION] = np.full((num_inj,), code, dtype=np.float32)
-            if ReturnVariables.VIOLATION_DETECTORS in asked:
-                generator_labels[ReturnVariables.VIOLATION_DETECTORS] = \
-                    np.zeros(tuple(ops.shape(time_delays)), dtype=np.float32) if violation_carriers is None \
-                    else violation_carriers
 
 
             scaling_dist = gf.Curriculum.resolve(scaling_method.value, epoch)

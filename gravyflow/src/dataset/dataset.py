@@ -26,9 +26,7 @@ from gravyflow.src.dataset.config import Defaults, WindowSpec, ignore_scale_fact
 from gravyflow.src.dataset.noise.noise import NoiseBatcher, addressed_by_index, obtainer_batcher, reads_real_data
 from gravyflow.src.dataset.acquisition.augmentations import Augmented, augment
 from gravyflow.src.dataset.acquisition.base import BaseDataObtainer
-from gravyflow.src.dataset.features.injection import (
-    VIOLATION_LABELS, InjectionGenerator, as_generator_list, check_scaling_matches_noise,
-)
+from gravyflow.src.dataset.features.injection import InjectionGenerator, as_generator_list, check_scaling_matches_noise
 from gravyflow.src.rng import TREE_VERSION, BatchStreams, SeedTree, check_coordinate, check_name, check_split
 from gravyflow.src.rng import platform
 from gravyflow.src.dataset.acquisition.versions import DATA_VERSIONS
@@ -1250,6 +1248,17 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
                         f"{type(generator).__name__} has no scaling_method; give it a "
                         "gf.ScalingMethod to inject it into a dataset."
                     )
+                # What each signal is: an IncoherentGenerator's is not known.
+                if gf.ReturnVariables.VIOLATION in self.variables_to_return \
+                        and isinstance(generator, gf.IncoherentGenerator):
+                    raise ValueError(
+                        "An IncoherentGenerator gives each detector a waveform of its own, which no real signal "
+                        "does, but it is no hard example whose violation is known: VIOLATION cannot label it. Use "
+                        "gf.HardExampleGenerator with gf.MismatchedWaveforms, or leave it out."
+                    )
+                # A hard example refuses a window that cannot hold its violation.
+                if generator.violation is not None:
+                    generator.check_window(self.onsource_duration_seconds)
                 # The generator's placement range in the window (padding None is
                 # as far as the window allows); a generator refuses a window it
                 # cannot place its signals in.
@@ -1590,7 +1599,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         }
         for key in self.variables_to_return:
             if isinstance(key, (gf.WaveformParameters, gf.ScalingTypes)) \
-                    or key is gf.ReturnVariables.CENTRAL_TIME or key in VIOLATION_LABELS \
+                    or key is gf.ReturnVariables.CENTRAL_TIME or key is gf.ReturnVariables.VIOLATION \
                     or key in gf.INJECTION_RECORDS:
                 value = labels.get(key)
                 batch[key] = _batch_first(value) if value is not None else \

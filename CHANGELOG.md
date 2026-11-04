@@ -179,13 +179,15 @@ repository before it may need the changes below.
   (`inject/{g}/violation/{detector,partner,sign,margin}`, `wave/{g}/violation/correlation`, and
   `wave/{g}/comp/{j}/...` for a detector's differing draws): every existing stream draws as before.
   `ReturnVariables.VIOLATION` (B, G) gives each generator's `gf.ViolationCode` (NONE, 0, for a real signal),
-  `ReturnVariables.VIOLATION_DETECTORS` (B, G, IFO) which detectors' copies carry it (1, else 0: none for a real
-  signal, the shifted detector of a wrong delay, the one detector holding a one-detector signal, every present
-  detector for a mismatched or reversed waveform, never an absent detector), both float32 and NaN where the generator
-  injected nothing (its `injection_chance`), and both refused by name with a `gf.IncoherentGenerator`, whose
-  detectors' waveforms differ though it names no violation (a labelled mismatch is `gf.MismatchedWaveforms`); and `CENTRAL_TIME` each copy's arrival (NaN where one detector holds the
-  signal and another none). A violation that
-  needs two detectors present refuses a network or `num_present` that can give fewer.
+  float32 and NaN where the generator injected nothing (its `injection_chance`), refused by name when the dataset is
+  built with a `gf.IncoherentGenerator`, whose detectors' waveforms differ though it names no violation (a labelled
+  mismatch is `gf.MismatchedWaveforms`, and a hard example is no component of one); and `CENTRAL_TIME` each copy's
+  arrival (NaN where one detector holds the signal and another none). Each generator declares the independent
+  waveforms its polarisations carry (`independent_waveforms`: 1 for a binary, sine-Gaussian, chirplet, ringdown or
+  periodic wave; 2 for a white-noise burst unless its eccentricity is 1 alone), since that many detectors receive any
+  waveforms in them: a wrong delay or a mismatch needs one more detector present, one detector three (a linearly
+  polarised source silences one detector at any sky), a reversal one, and a network or `num_present` that can
+  present fewer is refused by name when the dataset is built (`Violation.fewest_detectors`).
 
 - **Sites for test networks: LIGO-India, KAGRA and the Einstein Telescope.** `gf.Site` bundles the sites of I1, K1
   and the Einstein Telescope's triangle E1, E2 and E3: each vertex's latitude, longitude and elevation and each arm's

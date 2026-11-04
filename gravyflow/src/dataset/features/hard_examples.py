@@ -76,9 +76,10 @@ def _draws_one_value(generator : WaveformGenerator, draw : str) -> bool:
     """
     Whether every ``draw`` of ``generator`` is one value: a parameter whose
     distribution's support is a point, every component's for a vector (a
-    spin). A burst's ``"noise"``, its random content, never is.
+    spin). A content draw, a shape draw that is no parameter (a burst's
+    ``"noise"``), never is.
     """
-    if draw == "noise":
+    if draw not in (generator.distributed_attributes or ()):
         return False
     value = getattr(generator, draw)
     for component in value if isinstance(value, (tuple, list)) else (value,):
@@ -144,12 +145,12 @@ class Violation:
     def projection(self, hard_example, network, time_delays, present : np.ndarray, stream, num_examples : int,
                    offsets_seconds, extent_seconds, window_seconds : Optional[float]):
         """
-        Its change to the projection, (shifts, kept, carriers), each (Batch,
-        Detectors) (see HardExampleGenerator.draw_projection), from the
-        violation's streams (``stream(name)``): no shift, every detector kept,
-        and every present detector's copy a carrier.
+        Its change to the projection, (shifts, kept), each (Batch, Detectors)
+        or None (see HardExampleGenerator.draw_projection), from the
+        violation's streams (``stream(name)``): none, no shift and every
+        detector kept.
         """
-        return None, None, (present > 0).astype(np.float32)
+        return None, None
 
 
 @dataclass(frozen=True)
@@ -242,9 +243,7 @@ class WrongDelay(Violation):
         shifts = np.zeros((num_examples, num_detectors))
         # The copy's delay from its partner becomes sign x (light travel + margin).
         shifts[rows, detector] = sign * reach - (delays[rows, detector] - delays[rows, partner])
-        carriers = np.zeros((num_examples, num_detectors), dtype=np.float32)
-        carriers[rows, detector] = 1.0
-        return shifts, None, carriers
+        return shifts, None
 
     @staticmethod
     def _direction(hard_example, drawn, arrival, reach, extent_seconds, window_seconds : float):
@@ -255,7 +254,7 @@ class WrongDelay(Violation):
         detector (``arrival_bounds_seconds`` for the signal's
         ``extent_seconds``, before and after it). The partner's own arrival
         is a real one, so one direction at least keeps the copy there when the
-        range is twice the reach wide (the refusal of ``placement_range_seconds``),
+        range is twice the reach wide (the refusal of ``check_window``),
         and where neither does, the copy lies outside it by no more than its
         partner, which placement's rounding to a sample can put there.
         """
@@ -306,10 +305,10 @@ class OneDetector(Violation):
 
     def projection(self, hard_example, network, time_delays, present, stream, num_examples,
                    offsets_seconds, extent_seconds, window_seconds):
-        """Every detector's copy emptied but one, which carries the violation."""
+        """Every detector's copy emptied but one."""
         kept = np.zeros(present.shape, dtype=np.float32)
         kept[np.arange(num_examples), _choose(present, stream("detector"))] = 1.0
-        return None, kept, kept
+        return None, kept
 
 
 @dataclass(frozen=True)
@@ -321,7 +320,8 @@ class MismatchedWaveforms(Violation):
     ``comp/{j}``) and every other draw shared, so the detectors' waveforms
     differ in those draws alone: a parameter (one of the generator's
     ``distributed_attributes``, e.g. the masses, for chirps of other lengths)
-    or ``"noise"``, a burst's random content (a WNB's). One of them at least
+    or a content draw the generator names among its ``shape_attributes``
+    (``"noise"``, a white-noise burst's random content). One of them at least
     changes the waveform's shape (the generator's ``shape_attributes``: a
     binary's masses or spins, a burst's frequencies, length or noise) and can
     take more than one value: waveforms alike but for the amplitude and the
@@ -363,7 +363,8 @@ class MismatchedWaveforms(Violation):
     waveform, the one drawn with nothing differing: detector j's is
     sqrt(rho) h_shared + sqrt(1 - rho) h_j, so any two detectors' waveforms
     correlate by rho. It is taken only where the detectors differ in their
-    content alone (``differ`` is ``"noise"``, a white-noise burst's): the
+    content alone (a shape draw that is no parameter, which the generator
+    names in its ``shape_attributes``: a white-noise burst's ``"noise"``): the
     content is independent, so the mix is a burst of the same parameters
     (Gaussian content of the same power) inside the same extent. Where a
     parameter differs, the shared waveform's own draw of it gives the mix
@@ -392,23 +393,26 @@ class MismatchedWaveforms(Violation):
                     f"MismatchedWaveforms' correlation lies in [0, 1) (1 is the coherent signal, a real one); "
                     f"{correlation!r} reaches {low:g} to {high:g}."
                 )
-            if differ != ("noise",):
-                raise ValueError(
-                    "MismatchedWaveforms' correlation mixes in the shared waveform, drawn with nothing differing, so "
-                    "it holds only where the detectors differ in their content alone ('noise', a burst's): with "
-                    f"{[draw for draw in differ if draw != 'noise']} differing, the shared waveform's own draw gives "
-                    "it another shape, a beat with each detector's wave or chirp. Differ in 'noise' alone, or give "
-                    "correlation=None."
-                )
             object.__setattr__(self, "correlation", correlation)
 
     def check(self, generator):
-        known = set(generator.distributed_attributes or ()) | {"noise"}
-        unknown = [draw for draw in self.differ if draw not in known]
+        parameters = tuple(generator.distributed_attributes or ())
+        # A content draw is a shape draw that is no parameter: a burst's noise.
+        content = [draw for draw in generator.shape_attributes if draw not in parameters]
+        unknown = [draw for draw in self.differ if draw not in parameters and draw not in content]
         if unknown:
             raise ValueError(
                 f"MismatchedWaveforms differs in {unknown}, which {type(generator).__name__} does not draw: "
-                f"name its parameters ({', '.join(generator.distributed_attributes or ())}) or 'noise'."
+                f"name its parameters ({', '.join(parameters)}) or its content ({', '.join(content) or 'none'})."
+            )
+        drawn = [draw for draw in self.differ if draw in parameters]
+        if self.correlation is not None and drawn:
+            raise ValueError(
+                "MismatchedWaveforms' correlation mixes in the shared waveform, drawn with nothing differing, so it "
+                f"holds only where the detectors differ in their content alone ({', '.join(content) or 'none'} for "
+                f"a {type(generator).__name__}): with {drawn} differing, the shared waveform's own draw gives it "
+                "another shape, a beat with each detector's wave or chirp. Differ in its content alone, or give "
+                "correlation=None."
             )
         shape = [draw for draw in self.differ if draw in generator.shape_attributes]
         if not shape:
@@ -738,17 +742,17 @@ class HardExampleGenerator(WaveformGenerator):
         margin = self.detector_margin_seconds()
         return low - margin, high + margin
 
-    def placement_range_seconds(self, window_seconds : float):
+    def check_window(self, window_seconds : float) -> None:
         """
-        The generator's. A violation that shifts a copy (``reach_seconds``, a
-        wrong delay's) refuses a window that cannot hold its shifted copy
-        whatever the placement: its copy is kept where real signals arrive
+        Refuse by name, when the dataset is built, a window that cannot hold a
+        shifted copy (``reach_seconds``, a wrong delay's) whatever the
+        placement: its copy is kept where real signals arrive
         (``arrival_bounds_seconds``, gf.WrongDelay), and its partner's arrival
         can lie anywhere there, so that range must be twice the farthest shift
         wide for any signal of the generator, its longest put either side of
         its reference time.
         """
-        low, high = super().placement_range_seconds(window_seconds)
+        low, high = self.placement_range_seconds(window_seconds)
         reach = self.violation.reach_seconds(self.network)
         if reach > 0.0:
             signal = float(self.generator.get_max_generated_duration())
@@ -767,7 +771,6 @@ class HardExampleGenerator(WaveformGenerator):
                     f"by the detector margin, give {width:g} s. Give a smaller margin, a longer window or more "
                     "padding."
                 )
-        return low, high
 
     def generate(
         self,
@@ -811,16 +814,11 @@ class HardExampleGenerator(WaveformGenerator):
     ):
         """
         The violation's change to the projection, from the generator's
-        ``inject/{label}/violation/...`` streams: (shifts, kept, carriers),
-        each (Batch, Detectors). ``shifts`` (seconds, or None) is the time
-        each detector's copy is moved by, beyond its own delay
-        (``time_delays``, the projection's, (Batch, Detectors)); ``kept`` (or
-        None) is 1 in the detectors that keep the signal and 0 in the others;
-        ``carriers`` is 1 in the detectors whose copies carry the violation
-        and 0 in the others (``ReturnVariables.VIOLATION_DETECTORS``): the
-        shifted detector of a wrong delay, the one detector that holds the
-        signal, and every present detector for a mismatched or reversed
-        waveform.
+        ``inject/{label}/violation/...`` streams: (shifts, kept), each
+        (Batch, Detectors). ``shifts`` (seconds, or None) is the time each
+        detector's copy is moved by, beyond its own delay (``time_delays``,
+        the projection's, (Batch, Detectors)); ``kept`` (or None) is 1 in the
+        detectors that keep the signal and 0 in the others.
 
         A wrong delay keeps its copy in the window (``window_seconds`` long)
         by its direction, from each example's placement, ``offsets_seconds``

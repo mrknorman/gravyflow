@@ -177,9 +177,10 @@ its one placement reads (a binary's masses or spins; a ringdown's, chirplet's or
 white-noise burst's noise), and balanced to one source's loudness; and `gf.TimeReversed()`, the
 waveform reversed in time, only for a binary or a ringdown, whose reversal is a waveform no source of their kind
 makes. `ReturnVariables.VIOLATION` (B, G) labels each generator's `gf.ViolationCode` (NONE, 0, for a real signal),
-and `ReturnVariables.VIOLATION_DETECTORS` (B, G, IFO) the detectors whose copies carry it (a wrong delay's shifted
-detector, the one detector holding a one-detector signal, every present detector for a mismatched or reversed
-waveform), both NaN where the generator injected nothing.
+NaN where the generator injected nothing. A network of no more detectors than the independent waveforms a generator's
+polarisations carry (`independent_waveforms`: one for a binary, two for a white-noise burst of independent
+polarisations) receives any waveforms in them, so a wrong delay or a mismatch needs one more detector present, and
+one detector three; a network that can present fewer is refused by name.
 
 ```python
 binary = gf.CBCGenerator(mass_1_msun=uniform(15.0, 80.0), mass_2_msun=uniform(15.0, 80.0),
@@ -192,10 +193,10 @@ dataset = gf.Dataset(
     ifos=[gf.IFO.H1, gf.IFO.L1, gf.IFO.V1],
     waveform_generators=[late],
     input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
-    output_variables=[gf.ReturnVariables.VIOLATION, gf.ReturnVariables.VIOLATION_DETECTORS],
+    output_variables=[gf.ReturnVariables.VIOLATION],
 )
 _, outputs = dataset[0]
-print(outputs["VIOLATION"].shape, outputs["VIOLATION_DETECTORS"].shape)  # (32, 1) (32, 1, 3)
+print(outputs["VIOLATION"].shape)  # (32, 1)
 ```
 
 ## 4. Quick start: a CNN on a laptop CPU

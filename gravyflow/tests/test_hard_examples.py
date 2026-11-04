@@ -231,7 +231,7 @@ def test_a_wrong_delays_copy_falls_where_real_arrivals_do(margin, padding):
     padded = {} if padding is None else dict(front_padding_duration_seconds=padding,
                                              back_padding_duration_seconds=padding)
     hard = gf.HardExampleGenerator(wnb(network=network, **padded), gf.WrongDelay(margin))
-    hard.placement_range_seconds(window)
+    hard.check_window(window)
     rng = np.random.default_rng(1)
     # The burst extends 0.05 s either side of its reference time.
     extent = np.tile([0.05, 0.05], (num_examples, 1))
@@ -240,11 +240,11 @@ def test_a_wrong_delays_copy_falls_where_real_arrivals_do(margin, padding):
     delays = np.asarray(network.get_time_delay(
         np.float32(2.0 * np.pi * rng.random(num_examples)),
         np.float32(np.arcsin(2.0 * rng.random(num_examples) - 1.0))), np.float64)
-    shifts, _, carriers = hard.draw_projection(
+    shifts, _ = hard.draw_projection(
         network, delays, gf.SeedTree(5).batch("train", 0, 0), "hard", num_examples,
         offsets_seconds=offsets, extent_seconds=extent, window_seconds=window)
     real = (offsets[:, None] + delays).ravel()
-    copies = np.sum((offsets[:, None] + delays + shifts) * carriers, axis=-1)
+    copies = np.sum((offsets[:, None] + delays + shifts) * (shifts != 0.0), axis=-1)
     margin_seconds = hard.detector_margin_seconds()
     reach_low, reach_high = low[0] - margin_seconds, high[0] + margin_seconds
     assert reach_low <= real.min() and real.max() <= reach_high
@@ -510,9 +510,11 @@ def test_a_mismatch_correlates_only_its_content():
     differs, the shared waveform's own draw gives it another shape (two waves' or two binaries' chirps beat), so a
     correlation is refused by name.
     """
-    for differ in (("duration_seconds",), ("noise", "duration_seconds"), ("mass_1_msun",)):
+    for generator, differ in ((wnb(duration_seconds=uniform(0.05, 0.4)), ("duration_seconds",)),
+                              (wnb(duration_seconds=uniform(0.05, 0.4)), ("noise", "duration_seconds")),
+                              (gf.CBCGenerator(mass_1_msun=uniform(20.0, 40.0)), ("mass_1_msun",))):
         with pytest.raises(ValueError, match="correlation mixes in the shared waveform"):
-            gf.MismatchedWaveforms(differ, correlation=0.5)
+            gf.HardExampleGenerator(generator, gf.MismatchedWaveforms(differ, correlation=0.5))
     network = gf.Network([gf.IFO.H1, gf.IFO.L1, gf.IFO.V1])
     hard = gf.HardExampleGenerator(wnb(network=network, duration_seconds=uniform(0.05, 0.4)),
                                    gf.MismatchedWaveforms("noise", correlation=0.5), name="mixed")
@@ -788,39 +790,6 @@ def test_an_incoherent_generators_violation_is_refused():
         dataset([gf.IncoherentGenerator([wnb(), wnb(), wnb()])])[0]
 
 
-@pytest.mark.parametrize("ifos", [(gf.IFO.H1, gf.IFO.L1, gf.IFO.V1), DETECTORS], ids=["fixed", "per example"])
-def test_violation_detectors_name_each_copy_that_carries_the_violation(ifos):
-    """
-    Per detector: none for a real signal; the shifted copy of a wrong delay (the one detector whose arrival is not
-    the real signal's of its name); the one detector that holds a one-detector signal; every present detector for
-    a mismatched or reversed waveform; never an absent detector; NaN where nothing was injected.
-    """
-    def labels(generators):
-        x, y = dataset(generators, ifos=ifos, outputs=[RV.VIOLATION_DETECTORS])[0]
-        return np.asarray(x["DETECTOR_MASK"]) > 0, y
-
-    _, real = labels([wnb(name="delayed")])
-    present, y = labels([wnb(name="real"), gf.HardExampleGenerator(wnb(), gf.WrongDelay(0.01), name="delayed"),
-                         gf.HardExampleGenerator(wnb(), gf.OneDetector(), name="one"),
-                         gf.HardExampleGenerator(wnb(), gf.MismatchedWaveforms("noise"), name="mismatched"),
-                         gf.HardExampleGenerator(ringdown(), gf.TimeReversed(), name="reversed"),
-                         wnb(name="sometimes", injection_chance=0.5)])
-    carriers = np.asarray(y["VIOLATION_DETECTORS"])
-    assert carriers.shape == (BATCH, 6, present.shape[-1]) and carriers.dtype == np.float32
-    times, each = np.asarray(y["CENTRAL_TIME"]), np.asarray(y["DETECTOR_SNR"])
-    np.testing.assert_array_equal(carriers[:, 0], 0.0)
-    shifted = np.where(present, times[:, 1] != np.asarray(real["CENTRAL_TIME"])[:, 0], False)
-    assert np.all(np.sum(shifted, axis=-1) == 1)
-    np.testing.assert_array_equal(carriers[:, 1], shifted.astype(np.float32))
-    np.testing.assert_array_equal(carriers[:, 2], (each[:, 2] > 0).astype(np.float32))
-    assert np.all(np.sum(carriers[:, 2], axis=-1) == 1)
-    for g in (3, 4):
-        np.testing.assert_array_equal(carriers[:, g], present.astype(np.float32))
-    injected = ~np.isnan(np.asarray(y["VIOLATION"])[:, 5])
-    assert 0 < np.sum(injected) < BATCH
-    assert np.all(np.isnan(carriers[~injected, 5])) and np.all(carriers[injected, 5] == 0.0)
-
-
 def test_a_violation_acts_through_its_own_hooks():
     """
     What a violation does is its own: a one-detector signal that keeps the first present detector, by its own
@@ -831,15 +800,12 @@ def test_a_violation_acts_through_its_own_hooks():
         def projection(self, hard_example, network, time_delays, present, stream, num_examples, *placement):
             kept = np.zeros(present.shape, dtype=np.float32)
             kept[np.arange(num_examples), np.argmax(present > 0, axis=1)] = 1.0
-            return None, kept, kept
+            return None, kept
 
-    x, y = dataset([gf.HardExampleGenerator(wnb(), FirstDetector())], ifos=DETECTORS,
-                   outputs=[RV.VIOLATION_DETECTORS])[0]
+    x, y = dataset([gf.HardExampleGenerator(wnb(), FirstDetector())], ifos=DETECTORS)[0]
     present = np.asarray(x["DETECTOR_MASK"]) > 0
-    first = np.zeros(present.shape, dtype=np.float32)
-    first[np.arange(BATCH), np.argmax(present, axis=1)] = 1.0
-    np.testing.assert_array_equal(np.asarray(y["VIOLATION_DETECTORS"])[:, 0], first)
-    np.testing.assert_array_equal(np.asarray(y["DETECTOR_SNR"])[:, 0] > 0, first > 0)
+    np.testing.assert_array_equal(np.asarray(y["DETECTOR_SNR"])[:, 0] > 0,
+                                  np.arange(present.shape[-1]) == np.argmax(present, axis=1)[:, None])
 
 
 #: A sky held fixed, so each example's own geometry is known: every detector's delay and antenna pattern.
@@ -951,3 +917,38 @@ def test_a_coherence_violation_needs_more_detectors_than_its_generators_waveform
         # A drawn margin or mismatch leaves as much as it differs: a chirplet's start frequencies drawn near each
         # other leave 2e-4.
         assert min(taken) > 10.0 * max(coherent) and min(taken) > 1e-4, (name, violation, taken, coherent)
+
+
+def test_a_violation_is_labelled_by_kind_alone():
+    """
+    VIOLATION labels what an example is; which detector's copy of a two-detector wrong delay was moved is no label,
+    since the data cannot say (one copy shifted from the other is the other shifted back), so none is given.
+    """
+    assert not hasattr(gf.ReturnVariables, "VIOLATION_DETECTORS")
+
+
+def test_a_mismatch_differs_in_content_only_where_its_generator_draws_one():
+    """'noise', a burst's random content, is a draw only of a generator that names it among its shape draws."""
+    binary = gf.CBCGenerator(mass_1_msun=uniform(20.0, 40.0), **SNR_SCALED)
+    with pytest.raises(ValueError, match="does not draw"):
+        gf.HardExampleGenerator(binary, gf.MismatchedWaveforms(("mass_1_msun", "noise")))
+    with pytest.raises(ValueError, match="correlation mixes in the shared waveform"):
+        gf.HardExampleGenerator(binary, gf.MismatchedWaveforms(("mass_1_msun",), correlation=0.5))
+    gf.HardExampleGenerator(wnb(), gf.MismatchedWaveforms("noise", correlation=0.5))
+
+
+def test_what_cannot_label_or_hold_a_violation_is_refused_when_built():
+    """
+    An IncoherentGenerator's VIOLATION is refused when the dataset is built, not at its first batch; a hard example
+    is no component of an IncoherentGenerator, which would drop its violation; and a wrong delay's window is refused
+    once, when the dataset is built, its placement range the generator's.
+    """
+    with pytest.raises(ValueError, match="IncoherentGenerator"):
+        dataset([gf.IncoherentGenerator([wnb(), wnb(), wnb()])])
+    with pytest.raises(TypeError, match="hard example"):
+        gf.IncoherentGenerator([gf.HardExampleGenerator(wnb(), gf.OneDetector()), wnb(), wnb()])
+    network = gf.Network(list(NETWORK))
+    hard = gf.HardExampleGenerator(wnb(network=network), gf.WrongDelay(2.0))
+    assert hard.placement_range_seconds(1.0) == wnb(network=network).placement_range_seconds(1.0)
+    with pytest.raises(ValueError, match="WrongDelay hard example shifts its copy"):
+        dataset([hard])
