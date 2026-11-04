@@ -23,7 +23,8 @@ Each example says what it is: ``ReturnVariables.VIOLATION`` gives each
 generator's ``gf.ViolationCode`` (NONE for a real signal).
 
 Each violation is one class, a ``Violation``: what it checks, draws and changes
-are its own hooks, which the hard example calls in every case.
+are its own hooks, which the hard example calls in every case. A new kind of
+violation also adds its code to ``gf.ViolationCode``.
 """
 
 from copy import copy
@@ -96,10 +97,11 @@ class Violation:
     signals. A violation is a frozen dataclass of its parameters with its
     ``code``, and it acts only through the hooks below, each of which changes
     nothing by default: the hard example calls every hook and holds no case of
-    its own, so a new violation is one class and its own code in
-    gf.ViolationCode. The base itself, a class that names no ``code``, and one
-    whose code is NONE, a real signal's, are no violation and are refused by
-    name.
+    its own. So a new violation of an existing kind (a subclass that keeps its
+    parent's code) is one class, and a new kind is one class and a member of
+    gf.ViolationCode for its code, which only an edit of gf.ViolationCode
+    adds. The base itself, a class that names no ``code``, and one whose code
+    is NONE, a real signal's, are no violation and are refused by name.
     """
     code : ClassVar[ViolationCode]
 
