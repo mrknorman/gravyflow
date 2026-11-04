@@ -361,7 +361,7 @@ class ReturnVariables(Enum):
     # (gf.HardExampleGenerator), so evaluation can score each kind: float32,
     # NaN where the generator injected nothing (its injection_chance). Refused
     # with an IncoherentGenerator, whose detectors' waveforms differ though it
-    # names no violation (WaveformGenerator.violation_code).
+    # names no violation (WaveformGenerator.check_violation_label).
     VIOLATION = ReturnVariable(28, (BATCH, GENERATOR))
 
     def __lt__(self, other):
@@ -426,13 +426,21 @@ class WaveformGenerator:
     # A real signal violates nothing; a gf.HardExampleGenerator's violation.
     violation : ClassVar = None
 
+    def check_violation_label(self) -> None:
+        """
+        Refuse by name a generator whose signal ``ReturnVariables.VIOLATION``
+        cannot label (gf.IncoherentGenerator): none by default. Run by
+        ``violation_code``, wherever the label is made, and when a dataset
+        that returns the label is built, so it refuses there.
+        """
+
     def violation_code(self) -> int:
         """
         What its signal is, as ``ReturnVariables.VIOLATION`` labels it: its
-        violation's gf.ViolationCode, NONE (0) for a real signal. Read
-        wherever the label is made, and when a dataset that returns it is
-        built, so a generator whose signal cannot be labelled refuses there.
+        violation's gf.ViolationCode, NONE (0) for a real signal, once
+        ``check_violation_label`` has taken it.
         """
+        self.check_violation_label()
         return 0 if self.violation is None else int(self.violation.code)
 
     # The draws that change a waveform's shape, not only the amplitude and the
@@ -1573,7 +1581,7 @@ class IncoherentGenerator(WaveformGenerator):
         self.allow_partially_out_of_window = first.allow_partially_out_of_window
         self.network = first.network
 
-    def violation_code(self) -> int:
+    def check_violation_label(self) -> None:
         """Refused by name: its detectors' waveforms differ, though in what is not checked (see the class)."""
         raise ValueError(
             "An IncoherentGenerator gives each detector a waveform of its own, which no real signal does, but it is "

@@ -1118,7 +1118,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         validate_noise_settings(self.noise_obtainer, self.variables_to_return)
         check_scaling_matches_noise(self.noise_obtainer, self.waveform_generators)
         self._check_network_variables()
-        self._validate_padding_settings()
+        self._check_generators()
         self._validate_spectral_settings()
 
     def _check_network_variables(self):
@@ -1239,8 +1239,14 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         """The batch's one PSD estimate, shared by scaling, labels and whitening."""
         return estimate_psd(offsource, self.sample_rate_hertz, self.spectral_config)
 
-    def _validate_padding_settings(self):
-        """Validate that padding does not exceed half of onsource duration."""
+    def _check_generators(self):
+        """
+        Refuse by name a waveform generator the dataset cannot inject (one with
+        no scaling method), label (where ``ReturnVariables.VIOLATION`` is
+        returned, ``check_violation_label``) or hold in its window (a hard
+        example's ``check_window``), and warn of padding that reaches beyond
+        half the window.
+        """
         if self.waveform_generators:
             for generator in self.waveform_generators:
                 if getattr(generator, "scaling_method", None) is None:
@@ -1248,10 +1254,8 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
                         f"{type(generator).__name__} has no scaling_method; give it a "
                         "gf.ScalingMethod to inject it into a dataset."
                     )
-                # What each signal is, refused here where it cannot be labelled.
                 if gf.ReturnVariables.VIOLATION in self.variables_to_return:
-                    generator.violation_code()
-                # A hard example refuses a window that cannot hold its violation.
+                    generator.check_violation_label()
                 if generator.violation is not None:
                     generator.check_window(self.onsource_duration_seconds)
                 # The generator's placement range in the window (padding None is
@@ -1926,7 +1930,7 @@ class ComposedDataset(GravyflowDataset):
         for obtainer in self._obtainers():
             validate_noise_settings(obtainer, self.variables_to_return)
         self._check_network_variables()
-        self._validate_padding_settings()
+        self._check_generators()
         self._validate_spectral_settings()
 
     def _create_generators(self):

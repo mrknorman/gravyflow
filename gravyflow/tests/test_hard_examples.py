@@ -809,6 +809,10 @@ def test_an_incoherent_generators_violation_is_refused():
     """A different waveform in each detector is no real signal: its violation is refused by name, never labelled NONE."""
     with pytest.raises(ValueError, match="IncoherentGenerator"):
         dataset([gf.IncoherentGenerator([wnb(), wnb(), wnb()])])[0]
+    # Its own hook refuses it, which the label and a dataset that returns it run; a coherent generator's takes it.
+    with pytest.raises(ValueError, match="VIOLATION cannot label it"):
+        gf.IncoherentGenerator([wnb(), wnb()]).check_violation_label()
+    assert wnb().check_violation_label() is None
 
 
 def test_a_violation_acts_through_its_own_hooks():
