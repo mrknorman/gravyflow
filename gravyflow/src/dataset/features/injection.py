@@ -588,28 +588,23 @@ class WaveformGenerator:
         high = window_seconds / 2.0 if high is None else float(high)
         return -low, high
 
-    def placement_bounds_seconds(
-        self, parameters, window_seconds : float, num_examples : int, range_seconds=None,
-    ):
+    def placement_bounds_seconds(self, parameters, window_seconds : float, num_examples : int):
         """
         Each example's range of its reference time's offset from the window's
         centre, (low, high, too_long), each (Batch,): the placement range
-        (``range_seconds``, default ``placement_range_seconds``), and
+        (``placement_range_seconds``), and
         unless the generator allows partial signals, narrowed so that the
         whole signal (``get_signal_extent_seconds(parameters)``), delayed to
         any detector by up to the detector margin, lies inside the window. A
         signal too long for that (``too_long``) is centred: low = high = the
         offset that centres it, inside the placement range.
         """
-        range_low, range_high = self.placement_range_seconds(window_seconds) if range_seconds is None \
-            else range_seconds
+        range_low, range_high = self.placement_range_seconds(window_seconds)
         low = np.full(num_examples, float(range_low))
         high = np.full(num_examples, float(range_high))
         too_long = np.zeros(num_examples, dtype=bool)
         if not self.allow_partially_out_of_window:
-            before, after = self.get_signal_extent_seconds(parameters)
-            before = np.broadcast_to(np.asarray(before, dtype=np.float64), (num_examples,))
-            after = np.broadcast_to(np.asarray(after, dtype=np.float64), (num_examples,))
+            before, after = _signal_extent(self, parameters, num_examples)
             margin = self.detector_margin_seconds()
             fits_low = before + margin - window_seconds / 2.0
             fits_high = window_seconds / 2.0 - after - margin
@@ -1527,6 +1522,17 @@ class CBCGenerator(WaveformGenerator):
         )
 
 
+def _signal_extent(generator : WaveformGenerator, parameters, num_examples : int):
+    """
+    How far each of ``generator``'s signals extends before and after its
+    reference time for its ``parameters`` (``get_signal_extent_seconds``,
+    a pair of scalars or (Batch,) arrays), as (before, after), each (Batch,)
+    float64.
+    """
+    return tuple(np.broadcast_to(np.asarray(side, dtype=np.float64), (num_examples,))
+                 for side in generator.get_signal_extent_seconds(parameters))
+
+
 def _equal_by_specification(self, other) -> bool:
     """
     Equality of a generator built from others (gf.IncoherentGenerator,
@@ -1675,9 +1681,9 @@ class IncoherentGenerator(WaveformGenerator):
             # The presence is this generator's chance stream, so it is shared.
             waveforms.append(self.apply_injection_chance(component_waveforms, streams))
             parameters.append(component_parameters)
-            extent = component.get_signal_extent_seconds(component_parameters)
-            before.append(np.broadcast_to(np.asarray(extent[0], dtype=np.float64), (num_waveforms,)))
-            after.append(np.broadcast_to(np.asarray(extent[1], dtype=np.float64), (num_waveforms,)))
+            component_before, component_after = _signal_extent(component, component_parameters, num_waveforms)
+            before.append(component_before)
+            after.append(component_after)
 
         shapes = sorted({tuple(ops.shape(waveform)) for waveform in waveforms})
         if len(shapes) != 1:

@@ -40,7 +40,7 @@ import gravyflow as gf
 from gravyflow.src.dataset.conditioning.detector import C, ExampleNetworks
 from gravyflow.src.dataset.features.injection import (
     SIGNAL_EXTENT, IncoherentGenerator, WaveformGenerator, _common_values, _equal_by_specification,
-    get_support_bounds,
+    _signal_extent, get_support_bounds,
 )
 from gravyflow.src.dataset.tools.snr import _spectrum_for
 from gravyflow.src.rng.consumers import check_name
@@ -143,8 +143,10 @@ class Violation:
 
     def reach_seconds(self, network) -> float:
         """
-        The farthest it moves a detector's copy in time from its partner's
-        arrival, either way, on ``network``: 0.0, none.
+        The farthest it moves a detector's copy in time from a real arrival of
+        the example's signal, either way, on ``network``: the window holds that
+        much either side of where real signals arrive
+        (HardExampleGenerator.check_window). 0.0: it moves no copy.
         """
         return 0.0
 
@@ -157,7 +159,7 @@ class Violation:
         the generator's own.
         """
         waveforms, parameters = generator.generate(num_waveforms, sample_rate_hertz, duration_seconds, streams)
-        parameters[SIGNAL_EXTENT] = np.stack(_extent(generator, parameters, num_waveforms), axis=-1)
+        parameters[SIGNAL_EXTENT] = np.stack(_signal_extent(generator, parameters, num_waveforms), axis=-1)
         return waveforms, parameters
 
     def detector_balance(self, polarisations, background, sample_rate_hertz : float,
@@ -272,7 +274,11 @@ class WrongDelay(Violation):
             )
 
     def reach_seconds(self, network) -> float:
-        """``network``'s longest light travel plus the largest margin: 0.0 without a network."""
+        """
+        ``network``'s longest light travel plus the largest margin, the
+        farthest a copy lies from its partner's arrival, a real one: 0.0
+        without a network.
+        """
         if network is None:
             return 0.0
         return float(network.max_arrival_time_difference_seconds) + self.max_margin_seconds
@@ -322,7 +328,7 @@ class WrongDelay(Violation):
                 "A WrongDelay hard example keeps its shifted copy where real signals arrive, its whole signal in "
                 "the window, so its projection needs each signal's extent (its parameters' signal_extent_seconds)."
             )
-        low, high = hard_example.arrival_bounds_seconds(
+        low, high, _ = hard_example.arrival_bounds_seconds(
             {SIGNAL_EXTENT: extent_seconds}, window_seconds, int(np.size(arrival)))
 
         def outside(sign):
@@ -500,7 +506,7 @@ class MismatchedWaveforms(Violation):
                 )
             waveforms.append(jnp.asarray(component_waveforms))
             parameters.append(component_parameters)
-            extents.append(np.stack(_extent(generator, component_parameters, num_waveforms), axis=-1))
+            extents.append(np.stack(_signal_extent(generator, component_parameters, num_waveforms), axis=-1))
         if any(np.any(extent != extents[0]) for extent in extents[1:]):
             raise ValueError(
                 f"MismatchedWaveforms of a {type(generator).__name__} differing in {list(self.differ)}: its "
@@ -620,12 +626,6 @@ class _MismatchedStreams(BatchStreams):
 
     def sub(self, prefix : str):
         raise TypeError("A mismatched waveform's generator draws from its own streams, never a sub-tree of them.")
-
-
-def _extent(generator : WaveformGenerator, parameters, num_waveforms : int):
-    """``generator``'s signal extent for its ``parameters``, (before, after), each (Batch,) float64."""
-    return tuple(np.broadcast_to(np.asarray(side, dtype=np.float64), (num_waveforms,))
-                 for side in generator.get_signal_extent_seconds(parameters))
 
 
 #: The least singular value of the present detectors' stacked response
@@ -887,50 +887,49 @@ class HardExampleGenerator(WaveformGenerator):
         """The generator's: a reversed chirp keeps its length, run backwards."""
         return self.generator.in_band_duration_seconds(parameters, lower_frequency_hertz)
 
-    def arrival_bounds_seconds(self, parameters, window_seconds : float, num_examples : int, range_seconds=None):
+    def arrival_bounds_seconds(self, parameters, window_seconds : float, num_examples : int):
         """
         Where each example's real reference time can arrive in a detector, as
-        an offset from the window's centre, (low, high), each (Batch,): its
-        placement bounds (``placement_bounds_seconds``) widened by the
-        detector margin, the farthest a detector's arrival lies from the
-        placed one. Unless the generator allows partial signals, the whole
-        signal arriving there lies in the window, as the placement narrowed
-        its bounds for exactly that.
+        an offset from the window's centre, (low, high, too_long), each
+        (Batch,): its placement bounds (``placement_bounds_seconds``, whose
+        ``too_long`` it passes on) widened by the detector margin, the
+        farthest a detector's arrival lies from the placed one. Unless the
+        generator allows partial signals, the whole signal arriving there
+        lies in the window, as the placement narrowed its bounds for exactly
+        that.
         """
-        low, high, _ = self.placement_bounds_seconds(parameters, window_seconds, num_examples, range_seconds)
+        low, high, too_long = self.placement_bounds_seconds(parameters, window_seconds, num_examples)
         margin = self.detector_margin_seconds()
-        return low - margin, high + margin
+        return low - margin, high + margin, too_long
 
     def check_window(self, window_seconds : float) -> None:
         """
-        Refuse by name a window that cannot hold a shifted copy
-        (``reach_seconds``, a wrong delay's) whatever the placement: its copy
-        is kept where real signals arrive (``arrival_bounds_seconds``,
-        gf.WrongDelay), and its partner's arrival can lie anywhere there, so
-        that range must be twice the farthest shift wide for any signal of the
-        generator, its longest put either side of its reference time. Checked
-        when a dataset is built, and at every projection (``draw_projection``),
-        where the window meets the violation, so a gf.InjectionGenerator used
-        alone refuses it too.
+        Refuse by name a window that cannot hold a copy its violation moves
+        (``Violation.reach_seconds``) whatever the placement: the copy is kept
+        where real signals arrive (``arrival_bounds_seconds``) and lies up to
+        that reach from a real arrival, which can lie anywhere there, so that
+        range must be twice the reach wide for any signal of the generator,
+        its longest put either side of its reference time. Checked when a
+        dataset is built, and at every projection (``draw_projection``), where
+        the window meets the violation, so a gf.InjectionGenerator used alone
+        refuses it too.
         """
-        low, high = self.placement_range_seconds(window_seconds)
         reach = self.violation.reach_seconds(self.network)
         if reach > 0.0:
             signal = float(self.generator.get_max_generated_duration())
             extents = {SIGNAL_EXTENT: np.array([[signal, 0.0], [0.0, signal]])}
-            _, _, too_long = self.placement_bounds_seconds(extents, window_seconds, 2, range_seconds=(low, high))
-            earliest, latest = self.arrival_bounds_seconds(extents, window_seconds, 2, range_seconds=(low, high))
+            earliest, latest, too_long = self.arrival_bounds_seconds(extents, window_seconds, 2)
             width = 0.0 if np.any(too_long) else float(np.min(latest - earliest))
             if 2.0 * reach > width:
                 held = "its reference time" if self.allow_partially_out_of_window else \
                     f"its signal (up to {signal:g} s long)"
+                name = type(self.violation).__name__
                 raise ValueError(
-                    f"A {type(self.violation).__name__} hard example shifts its copy up to {reach:g} s from its "
-                    f"partner's arrival (the network's longest light travel plus the largest margin), either way, "
-                    f"and keeps it where real signals arrive, which leaves {held} in the window: that needs a "
-                    f"range {2.0 * reach:g} s wide, but the {window_seconds:g} s window and the padding, widened "
-                    f"by the detector margin, give {width:g} s. Give a smaller margin, a longer window or more "
-                    "padding."
+                    f"A {name} hard example moves a detector's copy up to {reach:g} s from a real arrival, either "
+                    f"way (its reach_seconds), and keeps it where real signals arrive, which leaves {held} in the "
+                    f"window: that needs a range {2.0 * reach:g} s wide, but the {window_seconds:g} s window and the "
+                    f"padding, widened by the detector margin, give {width:g} s. Give the violation less reach (see "
+                    f"gf.{name}), a longer window or more padding."
                 )
 
     def generate(

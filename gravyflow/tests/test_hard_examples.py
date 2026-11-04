@@ -277,7 +277,7 @@ def test_a_window_that_cannot_hold_a_wrong_delays_copy_is_refused():
     padded = dict(front_padding_duration_seconds=0.1, back_padding_duration_seconds=0.1)
     for margin, settings in ((2.0, {}), (uniform(0.3, 0.5), {}), (0.45, {}), (0.43, {}), (0.1, padded),
                              (uniform(0.3, 0.5), dict(allow_partially_out_of_window=True))):
-        with pytest.raises(ValueError, match="WrongDelay hard example shifts its copy"):
+        with pytest.raises(ValueError, match="WrongDelay hard example moves a detector.s copy"):
             dataset([gf.HardExampleGenerator(wnb(**settings), gf.WrongDelay(margin))])
     dataset([gf.HardExampleGenerator(wnb(), gf.WrongDelay(0.41))])
     dataset([gf.HardExampleGenerator(wnb(allow_partially_out_of_window=True), gf.WrongDelay(0.45))])
@@ -1215,7 +1215,7 @@ def test_what_cannot_label_or_hold_a_violation_is_refused_outside_a_dataset():
     _direct(incoherent, [gf.ScalingTypes.SNR])
     with pytest.raises(ValueError, match="IncoherentGenerator"):
         _direct(incoherent, [RV.VIOLATION])
-    with pytest.raises(ValueError, match="WrongDelay hard example shifts its copy"):
+    with pytest.raises(ValueError, match="WrongDelay hard example moves a detector.s copy"):
         _direct(gf.HardExampleGenerator(ringdown(network=two), gf.WrongDelay(0.9)), [RV.VIOLATION])
     labels = _direct(gf.HardExampleGenerator(ringdown(network=two), gf.WrongDelay(0.01)), [RV.VIOLATION])
     np.testing.assert_array_equal(np.asarray(labels[RV.VIOLATION]), float(gf.ViolationCode.WRONG_DELAY))
@@ -1244,7 +1244,7 @@ def test_what_cannot_label_or_hold_a_violation_is_refused_when_built():
     network = gf.Network(list(NETWORK))
     hard = gf.HardExampleGenerator(wnb(network=network), gf.WrongDelay(2.0))
     assert hard.placement_range_seconds(1.0) == wnb(network=network).placement_range_seconds(1.0)
-    with pytest.raises(ValueError, match="WrongDelay hard example shifts its copy"):
+    with pytest.raises(ValueError, match="WrongDelay hard example moves a detector.s copy"):
         dataset([hard])
 
 
