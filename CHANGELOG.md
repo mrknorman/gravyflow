@@ -138,105 +138,105 @@ repository before it may need the changes below.
 
 ### Added
 
-- **Hard examples.** `gf.HardExampleGenerator(generator, violation)` gives a generator's signals with one violation
-  of what a detector network can receive from a real source, one of the three below. It draws as its generator does
-  under its own name, and the injection layer places, projects, scales over the present detectors, crops and whitens
-  it as the generator's signals, so it differs in its violation alone. Its scaling method, injection chance, padding,
-  allow_partially_out_of_window, sky and reference time are its generator's when it is built: the injection layer
-  reads them from it, and they fingerprint it beside its generator and violation. Its independent_waveforms,
-  shape_attributes, extent_attributes and repeats_when_cut are its generator's. Its generator and violation may be
-  reassigned after it is built, and its generator changed (as the validator changes a dataset's generators): each is
-  checked to be what it can be (a coherent generator, not an `IncoherentGenerator` or another hard example; a
-  `gf.Violation`) as it is assigned, and every other check it makes of its generator, its own settings and its network
-  runs wherever it is used, as its network is set (when it is built, and as a dataset binds it) and as each batch is
-  projected. `gf.Violation`, the base, a subclass
+- **Hard examples.** `gf.HardExampleGenerator(generator, violation)` gives a generator's signals with one violation of
+  what a detector network can receive from a real source, one of the three below. It draws as its generator does under
+  its own name, and the injection layer places, projects, scales over the present detectors, crops and whitens it as the
+  generator's signals, so it differs in its violation alone. Its scaling method, injection chance, padding,
+  allow_partially_out_of_window, sky and reference time are its generator's when it is built: the injection layer reads
+  them from it, and they fingerprint it beside its generator and violation. It compares by what fingerprints it, its
+  specification, as an `IncoherentGenerator` does. Its independent_waveforms, shape_attributes, extent_attributes and
+  repeats_when_cut are its generator's. Its generator and violation may be reassigned after it is built, and its
+  generator changed (as the validator changes a dataset's generators): each is checked to be what it can be (a coherent
+  generator, not an `IncoherentGenerator` or another hard example; a `gf.Violation`) as it is assigned, and every other
+  check it makes of its generator, its own settings and its network runs wherever it is used, as its network is set
+  (when it is built, and as a dataset binds it) and as each batch is projected. `gf.Violation`, the base, a subclass
   that names no code, and one whose code is NONE, which would label its examples real signals, are refused by name.
-  There is no one-detector violation (a signal in one detector alone): a lone copy in one detector is reachable by a
-  real source near the other detectors' nulls, with no margin at the noise level for networks of up to four
-  detectors, so it cannot be labelled a violation. A model's behaviour on one detector is tested with networks of one
-  present detector (`gf.Detectors`' `num_present` from 1).
 
-- **Hard examples: a wrong delay.** `gf.WrongDelay(margin_seconds)` shifts one present detector's copy so that its
-  delay from another present detector, the example's own pair, is their light-travel time plus a margin drawn per
-  example, of at least 1 us, so that every wrong delay exceeds light travel after the projection's float32 rounding.
-  The margin is exact for the drawn pair only: other pairs with the shifted detector exceed theirs by more or not at
-  all, so it is a lower bound on the largest violation an example shows. The example is placed as its generator's
-  signals exactly, and its copy kept where the generator's signals arrive in a detector
-  (`HardExampleGenerator.arrival_bounds_seconds`: the placement bounds, which keep the whole signal the detector
-  margin from the window's edges and inside the padding, widened by that margin), by its direction: the drawn one,
-  or the other where only that keeps it there. So a copy reaches no part of the window a real arrival does not; a
-  window or padding too narrow for that is refused by name when the dataset is built and as the copy is projected,
-  so a `gf.InjectionGenerator` used alone refuses it too. A delay shows only where the window holds something a shift
-  changes, and what a window holds of a signal it cuts off can repeat itself (each generator's `repeats_when_cut`: a
-  periodic wave, a sine-Gaussian or a chirplet whose start and end frequencies can be equal, its envelope's ends
-  outside the window, or a ringdown's tail, a binary's included; never a white-noise burst's noise or a chirplet's
-  changing frequency, and the safe answer, that it can, for a generator that declares none). A shift of that part is
-  a shift by whole periods, or a gain and a phase, so a wrong delay of partial signals of such a generator is refused
-  by name. A whole signal shows its shift by as much as its envelope changes: a long periodic wave or a sine-Gaussian
-  of high quality factor, little.
+- **Hard examples: a wrong delay.** `gf.WrongDelay(margin_seconds)` shifts one present detector's copy so that its delay
+  from another present detector, the example's own pair, is their light-travel time plus a margin drawn per example, of
+  at least 1 us, so that every wrong delay exceeds light travel after the projection's float32 rounding. The margin is
+  exact for the drawn pair only: other pairs with the shifted detector exceed theirs by more or not at all, so it is a
+  lower bound on the largest violation an example shows. The example is placed as its generator's signals exactly, and
+  its copy kept where the generator's signals arrive in a detector (`HardExampleGenerator.arrival_bounds_seconds`: the
+  placement bounds, which keep the whole signal the detector margin from the window's edges and inside the padding,
+  widened by that margin), by its direction: the drawn one, or the other where only that keeps it there. So a copy
+  reaches no part of the window a real arrival does not; a window or padding too narrow for that is refused by name when
+  the dataset is built and as the copy is projected, so a `gf.InjectionGenerator` used alone refuses it too. A delay
+  shows only where the window holds something a shift changes, and what a window holds of a signal it cuts off can
+  repeat itself (each generator's `repeats_when_cut`: a periodic wave, a sine-Gaussian or a chirplet whose start and end
+  frequencies can be equal, its envelope's ends outside the window, or a ringdown's tail, a binary's included; never a
+  white-noise burst's noise or a chirplet's changing frequency, and the safe answer, that it can, for a generator that
+  declares none). A shift of that part is a shift by whole periods, or a gain and a phase, so a wrong delay of partial
+  signals of such a generator is refused by name. A whole signal shows its shift by as much as its envelope changes: a
+  long periodic wave or a sine-Gaussian of high quality factor, little.
 
 - **Hard examples: mismatched waveforms.** `gf.MismatchedWaveforms(differ, correlation=None)` gives each detector a
   waveform of its own, differing in the named draws with every other draw shared. A named draw is a parameter or a
-  content draw the generator names among its `shape_attributes` (a white-noise burst's `"noise"`); a differing
-  parameter is labelled NaN, as the generator labels it (a binary's heavier body is body 1, so a mismatch in
-  `mass_1_msun` can make either mass's label NaN). One draw at least changes the waveform's shape and takes more than
-  one value, since other skies and polarisations give waveforms alike but for the amplitude and the phase each
-  detector receives them with: the generators' `shape_attributes`, a binary's masses or spins, a burst's
-  frequencies, length or noise, never its amplitude, phase or polarisation eccentricity. A draw that moves the
-  signal's extent, which the one placement of every detector reads, is refused unless it takes one value (the
-  generators' `extent_attributes`: a burst's length, and a white-noise burst's band edges, drawn again with it), so a
-  sine-Gaussian, whose every shape draw sets its envelope's length, takes no mismatch. `correlation`, finite and
-  below 1, mixes in the coherent signal, and is taken only where the detectors differ in content draws alone: a
-  differing parameter's shared draw would give the mix another shape. Each detector's waveform is rescaled to
-  detector 0's noise-weighted polarisation power in that detector's noise, so every detector carries one source's
-  loudness and its SNR differs from a real signal's only through the antenna pattern; a mismatch is scaled to a
-  network SNR only.
+  content draw the generator names among its `shape_attributes` (a white-noise burst's `"noise"`); a differing parameter
+  is labelled NaN, as the generator labels it (a binary's heavier body is body 1, so a mismatch in `mass_1_msun` can
+  make either mass's label NaN). One draw at least changes the waveform's shape and takes more than one value, since
+  other skies and polarisations give waveforms alike but for the amplitude and the phase each detector receives them
+  with: the generators' `shape_attributes`, a binary's masses or spins, a burst's frequencies, length or noise, never
+  its amplitude, phase or polarisation eccentricity. A draw that moves the signal's extent, which the one placement of
+  every detector reads, is refused unless it takes one value (the generators' `extent_attributes`: a burst's length, and
+  a white-noise burst's band edges, drawn again with it), so a sine-Gaussian, whose every shape draw sets its envelope's
+  length, takes no mismatch. `correlation`, finite and below 1, mixes in the coherent signal, and is taken only where
+  the detectors differ in content draws alone: a differing parameter's shared draw would give the mix another shape.
+  Each detector's waveform is rescaled to detector 0's noise-weighted polarisation power in that detector's noise, so
+  every detector carries one source's loudness and its SNR differs from a real signal's only through the antenna
+  pattern; a mismatch is scaled to a network SNR only.
 
 - **Hard examples: time reversed.** `gf.TimeReversed()` reverses the waveform about its reference time: a chirp no
   binary makes. It is taken only by a generator that declares its reversal leaves its family
-  (`time_reversal_leaves_family`: `gf.CBCGenerator`), and refused by name for every other: a sine-Gaussian,
-  white-noise burst, periodic wave or chirplet, whose reversal is one of its own waveforms, and a ringdown, whose
-  reversed signal lies before its reference time where a ringdown's lies after it, so it would not be placed as the
-  generator's signals are.
+  (`time_reversal_leaves_family`: `gf.CBCGenerator`), and refused by name for every other: a sine-Gaussian, white-noise
+  burst, periodic wave or chirplet, whose reversal is one of its own waveforms, and a ringdown, whose reversed signal
+  lies before its reference time where a ringdown's lies after it, so it would not be placed as the generator's signals
+  are.
 
-- **Hard examples: the networks that can hold one.** Each generator declares the independent waveforms its
-  polarisations carry (`independent_waveforms`: 1 for an aligned-spin binary, sine-Gaussian, chirplet, ringdown or
-  periodic wave; 2 for a binary that can precess, whose cross polarisation is no quadrature of its plus, and a
-  white-noise burst unless its eccentricity is 1 alone), since that many detectors of independent responses receive
-  any waveforms in them. So a wrong delay or a mismatch needs one more independent detector present, a reversal one
-  (`Violation.fewest_detectors`). Detectors count as the rank of the span of their response tensors, to a singular
-  value of 1e-6: detectors of equal or opposite responses count once, however far apart (H1 with a slot of H1's arms
-  on the far side of the Earth), and one whose response is a combination of others' adds none (the Einstein
-  Telescope's triangle, whose three tensors sum to zero, counts two). The count is the safe one: it also refuses some
-  networks where dependent detectors would show a violation plainly (two co-located detectors holding different
-  waveforms). A network whose geometry is fixed (a `gf.Network`,
-  or a `gf.Detectors` of bundled detectors and slots at fixed sites, every subset of its fewest present detectors
-  counted) is refused by name when it is set, and where a slot's geometry is drawn, an example with fewer as it is
-  projected (`gf.Detectors.fixed_response` gives a fixed one's tensors). So are a hard example as a component of a
-  `gf.IncoherentGenerator`, which would drop its violation (its components are held as a tuple and checked as they
-  are assigned, when it is built or after), and `VIOLATION` with an `IncoherentGenerator`, whose detectors' waveforms differ though it names no
-  violation (a labelled mismatch is `gf.MismatchedWaveforms`), wherever the label is made.
+- **Hard examples: the networks that can hold one.** Each generator declares the independent waveforms its polarisations
+  carry (`independent_waveforms`: 1 for an aligned-spin binary, sine-Gaussian, chirplet, ringdown or periodic wave; 2
+  for a binary that can precess, whose cross polarisation is no quadrature of its plus, and a white-noise burst unless
+  its eccentricity is 1 alone), since that many detectors of independent responses receive any waveforms in them. So a
+  wrong delay or a mismatch needs one more independent detector present, a reversal one (`Violation.fewest_detectors`).
+  Detectors count as the rank of the span of their response tensors, to a singular value of 1e-6: detectors of equal or
+  opposite responses count once, however far apart (H1 with a slot of H1's arms on the far side of the Earth), and one
+  whose response is a combination of others' adds none (the Einstein Telescope's triangle, whose three tensors sum to
+  zero, counts two). The count is the safe one: it also refuses some networks where dependent detectors would show a
+  violation plainly (two co-located detectors holding different waveforms). A network whose geometry is fixed (a
+  `gf.Network`, or a `gf.Detectors` of bundled detectors and slots at fixed sites, every subset of its fewest present
+  detectors counted) is refused by name when it is set, and where a slot's geometry is drawn, an example with fewer as
+  it is projected (`gf.Detectors.fixed_response` gives a fixed one's tensors). So are a hard example as a component of a
+  `gf.IncoherentGenerator`, which would drop its violation (its components are held as a tuple and checked as they are
+  assigned, when it is built or after), and `VIOLATION` with an `IncoherentGenerator`, whose detectors' waveforms differ
+  though it names no violation (a labelled mismatch is `gf.MismatchedWaveforms`), wherever the label is made.
 
-- **Hard examples: labels and streams.** `ReturnVariables.VIOLATION` (B, G) gives each generator's
-  `gf.ViolationCode` (NONE, 0, for a real signal), float32, NaN where the generator injected nothing (its
-  `injection_chance`); `CENTRAL_TIME` gives each copy's arrival. The violations' own draws have streams of their own
-  (`inject/{g}/violation/{detector,partner,sign,margin}`, `wave/{g}/violation/correlation`, and
-  `wave/{g}/comp/{j}/...` for a detector's differing draws), so every existing stream draws as before: a dataset
-  without a hard example draws its digests of before (`fixtures/stream_digests`: its drawn labels, its placement in
-  whole samples and the sign of its white noise), and a named generator beside a hard example, before or after it,
-  draws what it draws alone. An unnamed generator's streams are labelled by its position among the dataset's
-  generators (`"{index}:{class}"`), as without hard examples, so it draws what it draws alone only at the position it
-  has alone.
+- **Hard examples: labels and streams.** `ReturnVariables.VIOLATION` (B, G) gives each generator's `gf.ViolationCode`
+  (NONE, 0, for a real signal), float32, NaN where the generator injected nothing (its `injection_chance`);
+  `CENTRAL_TIME` gives each copy's arrival. The label marks how an example was built, not whether its violation shows
+  above the noise: a wrong delay of a white-noise burst, whose polarisations carry two waveforms, on three detectors at
+  a network SNR of 12 can leave less than an SNR of 1 that no real source gives, so a label of what a model can detect
+  needs a margin of its own. The violations' own draws have streams of their own
+  (`inject/{g}/violation/{detector,partner,sign,margin}`, `wave/{g}/violation/correlation`, and `wave/{g}/comp/{j}/...`
+  for a detector's differing draws), so every existing stream draws as before: a dataset without a hard example draws
+  its digests of before (`fixtures/stream_digests`: its drawn labels, an incoherent injection's components' among them,
+  its placement in whole samples, and its noise, offsource and onsource, white and coloured: the sign of each white
+  offsource sample, and of each 64-sample block's sum of noise that arithmetic has touched), and a named generator
+  beside a hard example, before or after it, draws what it draws alone. An unnamed generator's streams are labelled by
+  its position among the dataset's generators (`"{index}:{class}"`), as without hard examples, so it draws what it draws
+  alone only at the position it has alone.
 
 - **Hard examples: measured.** A wrong delay's other pairs: for margins of 2 to 20 ms on networks of two to four
   detectors drawn on the sphere, the shifted copy exceeds the largest margin on another pair in about a quarter of
   examples. A wrong delay's copies near their range's edges are denser than real arrivals: for a 0.1 s burst in a 1 s
   window on H1, L1 and V1, with margins of 2 to 10 ms, 0.8 to 1.0 % of copies lie within 10 ms of the range's edges,
-  against 0.27 % of real arrivals. Each violation, fitted by free waveforms at its network's delays (the unfit share
-  of its power), is a real signal on the networks refused, leaving at most 2e-15, and none on those taken: wrong
-  delays leave 2e-3 to 0.36 at the best sky, and mismatches 3e-4 to 0.36, against at most 4e-3 for each generator's
-  real signal at its sky (a ringdown's sudden start), 1e-4 for a binary's and 1e-8 for a burst's. A mismatch is as far
-  from a real signal as its detectors' draws differ: a binary's masses drawn 0.2 % of their range apart leave 3e-5. A
+  against 0.27 % of real arrivals. Each violation, fitted by free waveforms at its network's delays (the unfit share of
+  its power), in one sample (seed 3, eight examples at right ascension 1.0, declination 0.3 and polarisation 0.4 rad,
+  margins of 10 to 20 ms, on H1 and L1, or H1, L1 and V1 for a white-noise burst of two waveforms), is a real signal on
+  the networks refused, leaving at most 9e-16, and none on those taken: at the best of 4000 skies, wrong delays leave
+  2.3e-3 to 0.36, and mismatches of draws at least a twentieth of their range apart 3.3e-4 to 0.355, against 4.4e-3 for
+  a ringdown's real signal at its sky (its sudden start), 1.3e-4 for a binary's and at most 7e-9 for a burst's. Those
+  are the sample's figures: at other skies and margins a wrong delay can leave much less. A mismatch is as far from a
+  real signal as its detectors' draws differ: a binary's masses drawn 0.2 % of their range apart leave 3e-5. A
   precessing binary (IMRPhenomPv2, a 30 and 8 solar-mass pair with an in-plane spin of 0.7) leaves 0.26 of its cross
   polarisation's power outside the span of its plus and the plus's quadrature, against 1.2e-3 for IMRPhenomD.
 
@@ -563,29 +563,29 @@ repository before it may need the changes below.
   bytes do not, and a set materialised before is refused by name (`FingerprintMismatch`), never served: materialise
   it again.
 
-- **A detector slot's geometry is drawn and held in float64.** `DetectorSlot.draw` rounded each drawn or fixed
-  parameter to float32, and `gf.ExampleNetworks` held each example's geometry in float32, so a slot's vertex was good
-  only to about half a metre, a fixed site's (`gf.DetectorSlot.at`, e.g. `gf.Site.I1`) included, while a Network's
-  was at lal's to 0.1 mm. A slot's parameters are now float64, from the same streams in the same order, and
-  `gf.ExampleNetworks` holds `detector_geometry`'s float64 geometry; the projection, the delays and
-  `DETECTOR_GEOMETRY` read it in float32, as a Network's projection does. A site slot's vertex is lal's to 3 mm
-  (the rounding of lal's own angles). Batches with slots change by float32 rounding of their geometry (the geometry
-  features by about 2e-7, an injection's per-detector SNR by about 1e-6); batches of bundled detectors alone, with or
-  without a drawn count of them, are unchanged, byte for byte. A slot's specification now holds the version of those
-  numerics (`DetectorSlot.GEOMETRY_NUMERICS`, 2), so the fingerprint of every dataset with a slot changes, and a set
-  materialised before is refused by name (`FingerprintMismatch`), never served: materialise it again. A dataset of
-  bundled detectors alone keeps its fingerprint.
+- **A detector slot's geometry is drawn and held in float64.** `DetectorSlot.draw` rounded each drawn or fixed parameter
+  to float32, and `gf.ExampleNetworks` held each example's geometry in float32, so a slot's vertex was good only to
+  about half a metre, a fixed site's (`gf.DetectorSlot.at`, e.g. `gf.Site.I1`) included, while a Network's was at lal's
+  to 0.1 mm. A slot's parameters are now float64, from the same streams in the same order, and `gf.ExampleNetworks`
+  holds `detector_geometry`'s float64 geometry; the projection, the delays and `DETECTOR_GEOMETRY` read it in float32,
+  as a Network's projection does. A site slot's vertex is lal's to 3 mm (the rounding of lal's own angles). Batches with
+  slots change by float32 rounding of their geometry (the geometry features by about 2e-7, an injection's per-detector
+  SNR by about 1e-6); batches of bundled detectors alone, with or without a drawn count of them, are unchanged, byte for
+  byte. A slot's specification now holds the version of those numerics (`DetectorSlot.GEOMETRY_NUMERICS`, 2), so the
+  fingerprint of every dataset with a slot changes, and a set materialised before is refused by name
+  (`FingerprintMismatch`), never served: materialise it again. A dataset of bundled detectors alone keeps its
+  fingerprint.
 
-- **An incoherent generator is fingerprinted by its components.** `gf.IncoherentGenerator` inherits the generator
-  base's dataclass fields but is built from its components, so a fingerprint read those fields alone: two incoherent
-  generators that differed only in a component (a burst's duration in one detector) fingerprinted the same, and a set
-  materialised for one could be served for the other. It now has a `specification()`: its own settings (the base's
-  fields, which the injection layer reads from it: its scaling method, injection chance, padding,
-  allow_partially_out_of_window and network, component 0's when it is built; its name, its own; its sky and reference
-  time, the base's defaults, since a component's are not read) and its components, in detector order, so a setting
-  changed after it is built (as the validator changes them) changes its fingerprint too. The
-  fingerprint of every dataset with an incoherent generator changes, so a set materialised before is never served for
-  it: materialise it again. Every other dataset keeps its fingerprint.
+- **An incoherent generator is fingerprinted by its components.** `gf.IncoherentGenerator` inherits the generator base's
+  dataclass fields but is built from its components, so a fingerprint read those fields alone: two incoherent generators
+  that differed only in a component (a burst's duration in one detector) fingerprinted the same, and a set materialised
+  for one could be served for the other. It now has a `specification()`: its own settings (the base's fields, which the
+  injection layer reads from it: its scaling method, injection chance, padding, allow_partially_out_of_window and
+  network, component 0's when it is built; its name, its own; its sky and reference time, the base's defaults, since a
+  component's are not read) and its components, in detector order, so a setting changed after it is built (as the
+  validator changes them) changes its fingerprint too. It compares by its specification too: two that differed only in a
+  component compared equal. The fingerprint of every dataset with an incoherent generator changes, so a set materialised
+  before is never served for it: materialise it again. Every other dataset keeps its fingerprint.
 
 - **Detectors that repeat a name are refused.** A detector's noise streams are named for it, so a dataset or noise
   batcher given one detector twice (H1 and H1) served identical noise in both channels, silently; it is refused by
