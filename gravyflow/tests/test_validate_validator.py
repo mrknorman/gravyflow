@@ -294,6 +294,19 @@ def test_the_efficiency_set_size_moves_no_positional_argument():
     assert [f.name for f in dataclasses.fields(ValidationConfig)][-1] == "efficiency_num_injections"
 
 
+def test_the_fingerprints_of_the_default_and_a_small_configuration_are_pinned(dataset_args, small_config):
+    # Literal values, so a default that drifts, or a setting that joins the canonical form unset, fails here: the
+    # fingerprint of the configuration with its datasets' arguments keys a saved validation (config_sha256), and one
+    # that changes refuses every validation saved before it. Change them only with a changelog entry that names the
+    # fingerprint change.
+    from gravyflow.src.utils.fingerprint import config_fingerprint
+
+    assert config_fingerprint(ValidationConfig()) == \
+        "62d9f27ee15c9577c3d9657e0fdfaa1f1f03fbd91049f9d81da83b95407066b2"
+    assert config_fingerprint(small_config, dataset_args) == \
+        "f815f783f70ac4a4faef3974cf62e4625371af5d0856975bba2e076e8c73e7a6"
+
+
 def reach_of(dataset_args, masses=None, spins=None, **settings):
     """The validator's reach for the example population, its component masses (low, high) and aligned spins as given."""
     args = deepcopy(dataset_args)
