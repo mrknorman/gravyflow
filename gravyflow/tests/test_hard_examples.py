@@ -146,7 +146,8 @@ def test_a_time_reversed_chirp_falls_from_its_merger():
 def test_a_wrong_delay_exceeds_its_pairs_light_travel_time_by_its_margin(ifos):
     margin = uniform(0.005, 0.02)
     # Plus polarisation alone: each detector's copy is the one waveform, scaled and delayed.
-    generator = gf.HardExampleGenerator(wnb(polarization_eccentricity=constant(1.0)), gf.WrongDelay(margin), name="late")
+    generator = gf.HardExampleGenerator(wnb(polarization_eccentricity=constant(1.0)), gf.WrongDelay(margin),
+                                        name="late")
     ds = dataset([generator], ifos=ifos)
     for k in range(3):
         x, y = ds[k]
@@ -350,7 +351,7 @@ def test_a_window_that_cannot_hold_a_wrong_delays_copy_is_refused():
     padded = dict(front_padding_duration_seconds=0.1, back_padding_duration_seconds=0.1)
     for margin, settings in ((2.0, {}), (uniform(0.3, 0.5), {}), (0.45, {}), (0.43, {}), (0.1, padded),
                              (uniform(0.3, 0.5), dict(allow_partially_out_of_window=True))):
-        with pytest.raises(ValueError, match="WrongDelay hard example moves a detector.s copy"):
+        with pytest.raises(ValueError, match="WrongDelay hard example.s copy in a detector lies up to"):
             dataset([gf.HardExampleGenerator(wnb(**settings), gf.WrongDelay(margin))])
     dataset([gf.HardExampleGenerator(wnb(), gf.WrongDelay(0.41))])
     dataset([gf.HardExampleGenerator(wnb(allow_partially_out_of_window=True), gf.WrongDelay(0.45))])
@@ -586,7 +587,9 @@ def test_a_mismatch_correlates_only_its_content():
 
 
 def test_a_mismatched_correlation_is_finite_and_below_one():
-    """A NaN correlation is refused by name, never served as a batch of NaN; rho = 1, the coherent signal, is a real one."""
+    """
+    A NaN correlation is refused by name, never served as a batch of NaN; rho = 1, the coherent signal, is a real one.
+    """
     for correlation in (1.5, 1.0, uniform(0.5, 1.0), float("nan"), constant(float("nan")), uniform(0.0, float("nan"))):
         with pytest.raises(ValueError, match="correlation lies in"):
             gf.MismatchedWaveforms("noise", correlation=correlation)
@@ -702,7 +705,8 @@ def test_a_distribution_says_whether_two_draws_can_coincide():
 #: chirp in band). The base eccentricity is elliptical, so the polarisations span both quadratures.
 SHAPES = {
     gf.SineGaussianGenerator: (
-        dict(frequency_hertz=100.0, quality_factor=10.0, amplitude=1.0, phase_radians=0.0, polarization_eccentricity=0.5),
+        dict(frequency_hertz=100.0, quality_factor=10.0, amplitude=1.0, phase_radians=0.0,
+             polarization_eccentricity=0.5),
         dict(frequency_hertz=120.0, quality_factor=5.0),
         dict(amplitude=1.7, phase_radians=0.9, polarization_eccentricity=0.2), ()),
     gf.ChirpletGenerator: (
@@ -818,7 +822,10 @@ def test_a_reversed_chirplet_is_a_chirplet_from_its_end_to_its_start():
 
 @pytest.mark.parametrize("shape", list(gf.WaveShape), ids=lambda shape: shape.name)
 def test_a_reversed_periodic_wave_is_a_periodic_wave(shape):
-    """Reversed, each wave shape is the shape at the opposite phase, or its negative (the polarisation turned by 90 degrees)."""
+    """
+    Reversed, each wave shape is the shape at the opposite phase, or its negative (the polarisation turned by 90
+    degrees).
+    """
     wave = dict(wave_shape=shape, frequency_hertz=100.0, duration_seconds=0.3)
     _, backward = _forward_and_reversed(gf.PeriodicWaveGenerator, phase_radians=0.7, **wave)
     opposite, _ = _forward_and_reversed(gf.PeriodicWaveGenerator, phase_radians=-0.7, **wave)
@@ -881,7 +888,9 @@ def test_the_violation_base_and_a_violation_without_a_code_are_refused():
 
 
 def test_a_hard_examples_declarations_are_its_generators():
-    """What a hard example declares of its polarisations and draws, and its repr, are its generator's, not the base's."""
+    """
+    What a hard example declares of its polarisations and draws, and its repr, are its generator's, not the base's.
+    """
     aligned = binary()
     hard = gf.HardExampleGenerator(aligned, gf.WrongDelay(0.005), name="late")
     assert hard.independent_waveforms == aligned.independent_waveforms == 1
@@ -1010,7 +1019,9 @@ def test_mismatched_waveforms_of_nothing_are_refused_by_name():
 
 
 def test_an_incoherent_generators_violation_is_refused():
-    """A different waveform in each detector is no real signal: its violation is refused by name, never labelled NONE."""
+    """
+    A different waveform in each detector is no real signal: its violation is refused by name, never labelled NONE.
+    """
     with pytest.raises(ValueError, match="IncoherentGenerator"):
         dataset([gf.IncoherentGenerator([wnb(), wnb(), wnb()])])[0]
     # Its own hook refuses it, which the label and a dataset that returns it run; a coherent generator's takes it.
@@ -1053,7 +1064,8 @@ COHERENCE = {
         inclination_radians=1.0, front_padding_duration_seconds=0.2, back_padding_duration_seconds=0.2,
         **SNR_SCALED, **kwargs), 1, ("mass_1_msun",)),
     "white-noise burst": (wnb, 2, ("noise",)),
-    "linear white-noise burst": (lambda **kwargs: wnb(polarization_eccentricity=constant(1.0), **kwargs), 1, ("noise",)),
+    "linear white-noise burst": (lambda **kwargs: wnb(polarization_eccentricity=constant(1.0), **kwargs), 1,
+                                 ("noise",)),
     "sine-Gaussian": (lambda **kwargs: gf.SineGaussianGenerator(
         frequency_hertz=100.0, quality_factor=5.0, polarization_eccentricity=0.5, **SNR_SCALED, **kwargs), 1, None),
     "chirplet": (lambda **kwargs: gf.ChirpletGenerator(
@@ -1130,9 +1142,10 @@ def test_a_coherence_violation_needs_more_detectors_than_its_generators_waveform
     Measured by a least-squares fit of the detectors' noise-free injections by free waveforms: on the refused
     networks (the taken network's examples, fewer detectors kept), at the example's own sky, it leaves nothing; on
     the taken network it leaves a share of the power that no sky removes, where the generator's real signal leaves
-    next to none at its sky. A mismatch is as far from a real signal as its detectors' draws differ, so it is measured where they
-    differ by at least a twentieth of their range. A binary's merger is kept from the window's edges, which would
-    cut its inspiral differently in each detector, and the ringdown rings for long enough to fit the model.
+    next to none at its sky. A mismatch is as far from a real signal as its detectors' draws differ, so it is
+    measured where they differ by at least a twentieth of their range. A binary's merger is kept from the window's
+    edges, which would cut its inspiral differently in each detector, and the ringdown rings for long enough to fit
+    the model.
     """
     make, independent, differ = COHERENCE[name]
     generator = make(**SKY)
@@ -1363,7 +1376,8 @@ def test_a_precessing_binary_carries_two_independent_waveforms():
     assert (aligned.independent_waveforms, precessing.independent_waveforms) == (1, 2)
     assert binary(gf.Approximant.IMRPhenomPv2, (0.0, 0.0, 0.3)).independent_waveforms == 1
     shares = unfit_cross(aligned), unfit_cross(precessing)
-    print(f"cross polarisation unfit by the plus and its quadrature: aligned {shares[0]:.1e}, precessing {shares[1]:.2f}")
+    print(f"cross polarisation unfit by the plus and its quadrature: aligned {shares[0]:.1e}, "
+          f"precessing {shares[1]:.2f}")
     assert shares[0] < 1e-2 < 1e-1 < shares[1]
     with pytest.raises(ValueError, match="needs 3 detectors present"):
         gf.HardExampleGenerator(binary(gf.Approximant.IMRPhenomPv2, (0.7, 0.0, 0.1)), gf.WrongDelay(0.01)).network = \
@@ -1398,7 +1412,7 @@ def test_what_cannot_label_or_hold_a_violation_is_refused_outside_a_dataset():
     _direct(incoherent, [gf.ScalingTypes.SNR])
     with pytest.raises(ValueError, match="IncoherentGenerator"):
         _direct(incoherent, [RV.VIOLATION])
-    with pytest.raises(ValueError, match="WrongDelay hard example moves a detector.s copy"):
+    with pytest.raises(ValueError, match="WrongDelay hard example.s copy in a detector lies up to"):
         _direct(gf.HardExampleGenerator(ringdown(network=two), gf.WrongDelay(0.9)), [RV.VIOLATION])
     labels = _direct(gf.HardExampleGenerator(ringdown(network=two), gf.WrongDelay(0.01)), [RV.VIOLATION])
     np.testing.assert_array_equal(np.asarray(labels[RV.VIOLATION]), float(gf.ViolationCode.WRONG_DELAY))
@@ -1427,7 +1441,7 @@ def test_what_cannot_label_or_hold_a_violation_is_refused_when_built():
     network = gf.Network(list(NETWORK))
     hard = gf.HardExampleGenerator(wnb(network=network), gf.WrongDelay(2.0))
     assert hard.placement_range_seconds(1.0) == wnb(network=network).placement_range_seconds(1.0)
-    with pytest.raises(ValueError, match="WrongDelay hard example moves a detector.s copy"):
+    with pytest.raises(ValueError, match="WrongDelay hard example.s copy in a detector lies up to"):
         dataset([hard])
 
 

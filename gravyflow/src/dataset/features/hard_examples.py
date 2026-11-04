@@ -257,14 +257,16 @@ class WrongDelay(Violation):
     time is kept where a real signal's reference time arrives in a detector
     (``arrival_bounds_seconds``: the placement bounds widened by the detector
     margin, which leave the whole signal in the window, or some of a partial
-    one), by
-    its direction: the drawn one, or the other where only that keeps it
-    there. So the copy reaches no part of the window a real arrival does not,
-    though its density near the range's edges need not be a real arrival's.
-    A range narrower than twice the farthest shift (the network's longest
-    light travel plus the largest margin), for the generator's longest
-    signal, cannot hold the copy whatever the placement and is refused by
-    name when the dataset is built and as the copy is projected.
+    one), by its direction: the drawn one, or the other where only that keeps
+    it there. So the copy reaches no part of the window a real arrival does
+    not, though its density near the range's edges need not be a real
+    arrival's. A range narrower than twice the farthest shift (the network's
+    longest light travel plus the largest margin) cannot hold the copy
+    whatever the placement, and is refused by name when the dataset is built
+    and as the copy is projected (HardExampleGenerator.check_window): the
+    range for the generator's longest signal put either side of its
+    reference time, and for partial signals, whose range narrows as a signal
+    shortens, the range for a point, a signal of no extent.
 
     A delay shows only where the window holds something of the signal that a
     shift changes: its envelope's ends, a changing frequency, its content.
@@ -437,8 +439,9 @@ class MismatchedWaveforms(Violation):
     (Gaussian content of the same power) inside the same extent. Where a
     parameter differs, the shared waveform's own draw of it gives the mix
     another shape (two waves' or two binaries' chirps beat, a cue in one
-    detector alone), so a correlation is refused by name. rho = 1 would be the coherent signal, a
-    real one, so it is refused; None is rho = 0, the waveforms' own.
+    detector alone), so a correlation is refused by name. rho = 1 would be
+    the coherent signal, a real one, so it is refused; None is rho = 0, the
+    waveforms' own.
     """
     differ : Tuple[str, ...]
     correlation : Union[None, float, "gf.Distribution"] = None
@@ -468,9 +471,8 @@ class MismatchedWaveforms(Violation):
         """
         Refuse by name a mismatch of draws its generator does not make, or
         that leave the shape alone, can come out equal in every detector or
-        move the extent, a
-        correlation of differing parameters, and a scaling other than a
-        network SNR (see the class).
+        move the extent, a correlation of differing parameters, and a scaling
+        other than a network SNR (see the class).
         """
         generator = hard_example.generator
         parameters = tuple(generator.distributed_attributes or ())
@@ -607,13 +609,17 @@ class TimeReversed(Violation):
 
     Only a generator that declares ``time_reversal_leaves_family`` takes it:
     gf.CBCGenerator, whose reversed chirp no binary makes. Any other is
-    refused by name. The reversal of a sine-Gaussian, a white-noise burst, a
-    periodic wave or a chirplet is one its generator makes (a symmetric
-    wavelet, another burst, another wave, a chirplet from its end frequency to
-    its start). A ringdown's reversal, which rises into its peak and stops,
-    is no ringdown, but its signal then lies before its reference time where
-    a ringdown's lies after it, so a reversed ringdown placed by its
-    reference time is not placed as the generator's signals are.
+    refused by name, since its reversal can be one its generator makes, or
+    differ from one only as the generator's own draws do: a white-noise
+    burst's is another such burst, a periodic wave's another wave, a
+    chirplet's one from its end frequency to its start (its generator's own
+    where its start and end distributions allow the swap), and a
+    sine-Gaussian's its own envelope and frequency, its handedness flipped
+    where its eccentricity is below 1 and its phase changed where it is
+    nonzero. A ringdown's reversal, which rises into its peak and stops, is
+    no ringdown, but its signal then lies before its reference time where a
+    ringdown's lies after it, so a reversed ringdown placed by its reference
+    time is not placed as the generator's signals are.
     """
     code : ClassVar[ViolationCode] = ViolationCode.TIME_REVERSED
 
@@ -626,10 +632,11 @@ class TimeReversed(Violation):
         if not generator.time_reversal_leaves_family:
             raise ValueError(
                 f"TimeReversed takes a generator whose waveform reversed in time leaves its family "
-                f"(time_reversal_leaves_family: a CBCGenerator), not a {type(generator).__name__}: a sine-Gaussian "
-                "reversed is the same wavelet, a white-noise burst another such burst, a periodic wave a periodic "
-                "wave, a chirplet one from its end to its start, and a ringdown's signal reversed lies before its "
-                "reference time, so it would not be placed as a ringdown's signals are."
+                f"(time_reversal_leaves_family: a CBCGenerator), not a {type(generator).__name__}: a white-noise "
+                "burst reversed is another such burst, a periodic wave a periodic wave, a chirplet one from its end "
+                "frequency to its start, a sine-Gaussian its own wavelet but for its handedness and phase, and a "
+                "ringdown's signal reversed lies before its reference time, so it would not be placed as a "
+                "ringdown's signals are."
             )
 
     def generate(self, generator, network, num_waveforms, sample_rate_hertz, duration_seconds, streams):
@@ -761,19 +768,19 @@ class HardExampleGenerator(WaveformGenerator):
     name (``name``, default its position and class), so its examples are
     independent of the generator's own in a dataset beside it. Its scaling
     method, injection chance, padding, allow_partially_out_of_window, sky and
-    reference time are its own, the generator's when it is built: the injection layer reads them from it,
-    and they fingerprint it, so one changed afterwards (as the validator
-    does) changes the hard example, and the generator's are not read. It
-    compares, as it fingerprints, by those, its generator and its violation
-    (``specification``). Its
-    network is the generator's, or the dataset's. Placement,
-    the SNR target over the present detectors, the window and whitening are
-    the injection layer's, as for the generator, so a hard example sits in the
-    window as a real signal does (a wrong delay keeps its shifted copy where
-    its generator's signals arrive by the copy's direction, gf.WrongDelay),
-    but that a short partial signal is kept where some of it reaches the
-    window in every detector (``placement_bounds_seconds``), where a real one
-    can show in fewer detectors than the violation needs.
+    reference time are its own, the generator's when it is built: the
+    injection layer reads them from it, and they fingerprint it, so one
+    changed afterwards (as the validator does) changes the hard example, and
+    the generator's are not read. It compares, as it fingerprints, by those,
+    its generator and its violation (``specification``). Its network is the
+    generator's, or the dataset's. Placement, the SNR target over the present
+    detectors, the window and whitening are the injection layer's, as for the
+    generator, so a hard example sits in the window as a real signal does (a
+    wrong delay keeps its shifted copy where its generator's signals arrive
+    by the copy's direction, gf.WrongDelay), but that a short partial signal
+    is kept where some of it reaches the window in every detector
+    (``placement_bounds_seconds``), where a real one can show in fewer
+    detectors than the violation needs.
 
     The violation acts through its own hooks (``Violation``), which this calls
     in every case. Every example needs the independent detectors present
@@ -785,12 +792,18 @@ class HardExampleGenerator(WaveformGenerator):
     response is a combination of others' adds none). A network whose
     geometry is fixed (a Network, or gf.Detectors of bundled detectors and
     fixed slots) that can give fewer is refused by name when it is set,
-    every subset of its fewest present detectors counted; where a
-    slot's geometry is drawn, its fewest present detectors are checked when it
-    is set and each example as it is projected. TimeReversed takes only a
-    binary, whose reversal leaves its family (gf.TimeReversed), and WrongDelay
-    no partial signals of a generator whose signal cut by the window can
-    repeat itself (``repeats_when_cut``, gf.WrongDelay).
+    every subset of its fewest present detectors counted; where a slot's
+    geometry is drawn, its fewest present detectors are checked when it is
+    set and each example as it is projected. The count reads the network
+    alone, but what a wrong delay violates depends on the sky too: on three
+    detectors, at the skies where two of them have parallel antenna vectors
+    (F+, Fx), a set of measure zero, a wrong delay of the third of a
+    generator whose polarisations carry two waveforms is a real signal, and
+    near them its violation shrinks as the squared sine of the angle between
+    those vectors. TimeReversed takes only a binary, whose reversal leaves
+    its family (gf.TimeReversed), and WrongDelay no partial signals of a
+    generator whose signal cut by the window can repeat itself
+    (``repeats_when_cut``, gf.WrongDelay).
 
     Its generator and violation may be reassigned after it is built, and its
     generator changed, as the validator changes a dataset's generators: each
@@ -1011,11 +1024,11 @@ class HardExampleGenerator(WaveformGenerator):
                     f"its signal (up to {signal:g} s long)"
                 name = type(self.violation).__name__
                 raise ValueError(
-                    f"A {name} hard example moves a detector's copy up to {reach:g} s from a real arrival, either "
-                    f"way (its reach_seconds), and keeps it where real signals arrive, which leaves {held} in the "
-                    f"window: that needs a range {2.0 * reach:g} s wide, but the {window_seconds:g} s window and the "
-                    f"padding, widened by the detector margin, give {width:g} s. Give the violation less reach (see "
-                    f"gf.{name}), a longer window or more padding."
+                    f"A {name} hard example's copy in a detector lies up to {reach:g} s from a real arrival of its "
+                    f"signal, either way (its reach_seconds), and is kept where real signals arrive, which leaves "
+                    f"{held} in the window: that needs a range {2.0 * reach:g} s wide, but the {window_seconds:g} s "
+                    f"window and the padding, widened by the detector margin, give {width:g} s. Give the violation "
+                    f"less reach (see gf.{name}), a longer window or more padding."
                 )
 
     def generate(

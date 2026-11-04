@@ -199,10 +199,12 @@ repository before it may need the changes below.
 
 - **Hard examples: time reversed.** `gf.TimeReversed()` reverses the waveform about its reference time: a chirp no
   binary makes. It is taken only by a generator that declares its reversal leaves its family
-  (`time_reversal_leaves_family`: `gf.CBCGenerator`), and refused by name for every other: a sine-Gaussian, white-noise
-  burst, periodic wave or chirplet, whose reversal is one of its own waveforms, and a ringdown, whose reversed signal
-  lies before its reference time where a ringdown's lies after it, so it would not be placed as the generator's signals
-  are.
+  (`time_reversal_leaves_family`: `gf.CBCGenerator`), and refused by name for every other: a white-noise burst or a
+  periodic wave, whose reversal is another of its kind, a chirplet, whose reversal runs from its end frequency to its
+  start (its generator's own where its start and end distributions allow the swap), a sine-Gaussian, whose reversal is
+  its own wavelet with its handedness flipped where its eccentricity is below 1 and its phase changed where it is
+  nonzero, and a ringdown, whose reversed signal lies before its reference time where a ringdown's lies after it, so it
+  would not be placed as the generator's signals are.
 
 - **Hard examples: the networks that can hold one.** Each generator declares the independent waveforms its polarisations
   carry (`independent_waveforms`: 1 for an aligned-spin binary, sine-Gaussian, chirplet, ringdown or periodic wave; 2
@@ -224,8 +226,13 @@ repository before it may need the changes below.
   detectors counted) is refused by name when it is set, and where a slot's geometry is drawn, an example with fewer as
   it is projected (`gf.Detectors.fixed_response` gives a fixed one's tensors). So are a hard example as a component of a
   `gf.IncoherentGenerator`, which would drop its violation (its components are held as a tuple and checked as they are
-  assigned, when it is built or after), and `VIOLATION` with an `IncoherentGenerator`, whose detectors' waveforms differ
-  though it names no violation (a labelled mismatch is `gf.MismatchedWaveforms`), wherever the label is made.
+  assigned, when it is built or after: each a waveform generator, neither an `IncoherentGenerator` nor a hard example),
+  and `VIOLATION` with an `IncoherentGenerator`, whose detectors' waveforms differ though it names no violation (a
+  labelled mismatch is `gf.MismatchedWaveforms`), wherever the label is made. The count reads the network alone, but
+  what a wrong delay violates depends on the sky too: on three detectors, at the skies where two of them have parallel
+  antenna vectors (F+, Fx), a set of measure zero, a wrong delay of the third of a generator whose polarisations carry
+  two waveforms is a real signal, and near them its violation shrinks as the squared sine of the angle between those
+  vectors.
 
 - **Hard examples: labels and streams.** `ReturnVariables.VIOLATION` (B, G) gives each generator's `gf.ViolationCode`
   (NONE, 0, for a real signal), float32, NaN where the generator injected nothing (its `injection_chance`);
@@ -593,8 +600,8 @@ repository before it may need the changes below.
   to 0.1 mm. A slot's parameters are now float64, from the same streams in the same order, and `gf.ExampleNetworks`
   holds `detector_geometry`'s float64 geometry; the projection, the delays and `DETECTOR_GEOMETRY` read it in float32,
   as a Network's projection does. A site slot's vertex is lal's to 3 mm (the rounding of lal's own angles). Batches with
-  slots change by float32 rounding of their geometry (the geometry features by about 2e-7, an injection's per-detector
-  SNR by about 1e-6); batches of bundled detectors alone, with or without a drawn count of them, are unchanged, byte for
+  slots change by float32 rounding of their geometry (the geometry features by about 6e-8 to 7e-8, an injection's
+  per-detector SNR by about 1.4e-6 to 1.9e-6); batches of bundled detectors alone, with or without a drawn count of them, are unchanged, byte for
   byte. A slot's specification now holds the version of those numerics (`DetectorSlot.GEOMETRY_NUMERICS`, 2), so the
   fingerprint of every dataset with a slot changes, and a set materialised before is refused by name
   (`FingerprintMismatch`), never served: materialise it again. A dataset of bundled detectors alone keeps its

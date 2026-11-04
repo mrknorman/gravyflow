@@ -594,12 +594,12 @@ class WaveformGenerator:
         """
         Each example's range of its reference time's offset from the window's
         centre, (low, high, too_long), each (Batch,): the placement range
-        (``placement_range_seconds``), and
-        unless the generator allows partial signals, narrowed so that the
-        whole signal (``get_signal_extent_seconds(parameters)``), delayed to
-        any detector by up to the detector margin, lies inside the window. A
-        signal too long for that (``too_long``) is centred: low = high = the
-        offset that centres it, inside the placement range.
+        (``placement_range_seconds``), and unless the generator allows
+        partial signals, narrowed so that the whole signal
+        (``get_signal_extent_seconds(parameters)``), delayed to any detector by
+        up to the detector margin, lies inside the window. A signal too long
+        for that (``too_long``) is centred: low = high = the offset that
+        centres it, inside the placement range.
         """
         range_low, range_high = self.placement_range_seconds(window_seconds)
         if self.allow_partially_out_of_window:

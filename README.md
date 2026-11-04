@@ -187,7 +187,10 @@ a mismatch needs one more detector present, counted as the rank of the span of t
 detectors of equal or opposite responses count once, and one whose response is a combination of others' adds none (the
 Einstein Telescope's triangle counts two). A network that can present fewer is refused by name, and every one of them
 shows the signal: a hard example's partial signal is kept where some of it reaches the window in every detector (a real
-one may arrive wholly outside it in one).
+one may arrive wholly outside it in one). The count reads the network alone, but what a wrong delay violates depends on
+the sky too: on three detectors, at the skies where two of them have parallel antenna vectors (F+, Fx), a set of
+measure zero, a wrong delay of the third of a two-waveform generator is a real signal, and near them its violation
+shrinks as the squared sine of the angle between those vectors.
 
 ```python
 binary = gf.CBCGenerator(mass_1_msun=uniform(15.0, 80.0), mass_2_msun=uniform(15.0, 80.0),
