@@ -565,25 +565,62 @@ def test_a_bursts_mismatch_changes_its_shape():
             wnb(polarization_eccentricity=uniform(0.0, 1.0)), gf.MismatchedWaveforms("polarization_eccentricity"))
 
 
-def test_a_mismatch_draws_more_than_one_value():
+def choice(*values):
+    return gf.Distribution(possible_values=list(values), type_=gf.DistributionType.CHOICE)
+
+
+def test_a_mismatchs_detectors_never_share_its_shape_draws():
     """
-    A draw that changes the shape but takes one value (a binary's masses, by default) is the same in every detector,
-    which then receives the coherent, real signal: a mismatch whose shape draws each take one value is refused.
+    A draw that changes the shape but can come out equal in every detector, as a value of its own probability, gives
+    them one waveform there, the coherent, real signal: one of one value (a binary's masses, by default) every time,
+    and one of a few values (a CHOICE, an integer's, a POW_TWO) as often as the detectors' draws coincide. A mismatch
+    whose shape draws are each such a draw is refused; one continuous draw among them keeps every two detectors apart.
     """
-    single = gf.Distribution(possible_values=[30.0], type_=gf.DistributionType.CHOICE)
+    pair = choice(20.0, 30.0)
     for generator, differ in (
             (gf.CBCGenerator(), ("mass_1_msun",)),
             (gf.CBCGenerator(), ("mass_1_msun", "mass_2_msun")),
             (gf.CBCGenerator(distance_mpc=uniform(100.0, 500.0)), ("mass_1_msun", "distance_mpc")),
             (gf.CBCGenerator(), ("spin_1_in",)),
             (gf.CBCGenerator(mass_1_msun=uniform(30.0, 30.0)), ("mass_1_msun",)),
-            (gf.CBCGenerator(mass_1_msun=single), ("mass_1_msun",)),
+            (gf.CBCGenerator(mass_1_msun=choice(30.0)), ("mass_1_msun",)),
+            (gf.CBCGenerator(mass_1_msun=pair), ("mass_1_msun",)),
+            (gf.CBCGenerator(mass_1_msun=pair, mass_2_msun=choice(20.0, 25.0)), ("mass_1_msun", "mass_2_msun")),
+            (gf.CBCGenerator(mass_1_msun=gf.Distribution(min_=16.0, max_=64.0, type_=gf.DistributionType.POW_TWO)),
+             ("mass_1_msun",)),
+            (gf.PeriodicWaveGenerator(frequency_hertz=choice(100.0, 200.0), duration_seconds=0.2),
+             ("frequency_hertz",)),
             (wnb(), ("duration_seconds", "min_frequency_hertz"))):
-        with pytest.raises(ValueError, match="has one value only"):
+        with pytest.raises(ValueError, match="can come out equal in every detector"):
             gf.HardExampleGenerator(generator, gf.MismatchedWaveforms(differ))
     gf.HardExampleGenerator(gf.CBCGenerator(mass_2_msun=uniform(20.0, 30.0)),
                             gf.MismatchedWaveforms(("mass_1_msun", "mass_2_msun")))
+    gf.HardExampleGenerator(gf.CBCGenerator(mass_1_msun=pair, mass_2_msun=uniform(20.0, 30.0)),
+                            gf.MismatchedWaveforms(("mass_1_msun", "mass_2_msun")))
+    gf.HardExampleGenerator(gf.CBCGenerator(spin_1_in=(0.0, 0.0, uniform(-0.5, 0.5))),
+                            gf.MismatchedWaveforms(("spin_1_in",)))
     gf.HardExampleGenerator(wnb(), gf.MismatchedWaveforms(("duration_seconds", "noise")))
+
+
+def test_a_distribution_says_whether_two_draws_can_coincide():
+    """
+    Continuous: no value has a probability of its own, so two independent draws differ with probability one. A
+    distribution of one value or of a few, or of integers, is not.
+    """
+    continuous = (uniform(1.0, 2.0), gf.Distribution(mean=0.0, std=1.0, type_=gf.DistributionType.NORMAL),
+                  gf.Distribution(min_=1.0, max_=2.0, mean=1.5, std=0.5, type_=gf.DistributionType.NORMAL),
+                  gf.Distribution(min_=1.0, max_=100.0, type_=gf.DistributionType.LOG))
+    atomic = (constant(1.0), uniform(1.0, 1.0), uniform(1, 3, int), choice(1.0, 2.0), choice(1.0),
+              gf.Distribution(min_=1.0, max_=100.0, type_=gf.DistributionType.LOG, dtype=int),
+              gf.Distribution(min_=2.0, max_=2.0, mean=1.5, std=0.5, type_=gf.DistributionType.NORMAL),
+              gf.Distribution(mean=1.0, std=0.0, type_=gf.DistributionType.NORMAL),
+              gf.Distribution(min_=2.0, max_=16.0, type_=gf.DistributionType.POW_TWO))
+    assert all(distribution.continuous for distribution in continuous)
+    assert not any(distribution.continuous for distribution in atomic)
+    rng = np.random.default_rng(0)
+    for distribution in atomic[2:5]:
+        draws = distribution.sample(64, rng), distribution.sample(64, rng)
+        assert np.any(draws[0] == draws[1]), distribution
 
 
 #: Each generator's draws: a base value of every one, then the draws that change its waveform's shape and those that
@@ -1267,12 +1304,12 @@ def test_a_hard_example_checks_its_generator_wherever_it_is_used():
         return gf.HardExampleGenerator(ringdown(frequency_hertz=uniform(100.0, 200.0)),
                                        gf.MismatchedWaveforms(("frequency_hertz",)))
 
-    with pytest.raises(ValueError, match="has one value only"):
+    with pytest.raises(ValueError, match="can come out equal in every detector"):
         dataset([one_valued(mismatch())])
     built = dataset([mismatch()])
     built[0]
     one_valued(built.waveform_generators[0])
-    with pytest.raises(ValueError, match="has one value only"):
+    with pytest.raises(ValueError, match="can come out equal in every detector"):
         built[1]
 
 

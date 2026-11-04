@@ -95,6 +95,23 @@ def _draws_one_value(generator : WaveformGenerator, draw : str) -> bool:
     return True
 
 
+def _draws_apart(generator : WaveformGenerator, draw : str) -> bool:
+    """
+    Whether two independent ``draw``s of ``generator`` differ with
+    probability one, so that detectors that each make it never share it: a
+    content draw, a shape draw that is no parameter (a burst's ``"noise"``,
+    Gaussian), or a parameter whose distribution is continuous
+    (gf.Distribution.continuous), in one component at least for a vector (a
+    spin). A parameter of one value, or of a few (a CHOICE, a POW_TWO, an
+    integer's), gives two detectors one value with nonzero probability.
+    """
+    if draw not in (generator.distributed_attributes or ()):
+        return True
+    value = getattr(generator, draw)
+    return any(isinstance(component, gf.Distribution) and component.continuous
+               for component in (value if isinstance(value, (tuple, list)) else (value,)))
+
+
 @dataclass(frozen=True)
 class Violation:
     """
@@ -366,11 +383,14 @@ class MismatchedWaveforms(Violation):
     or a content draw the generator names among its ``shape_attributes``
     (``"noise"``, a white-noise burst's random content). One of them at least
     changes the waveform's shape (the generator's ``shape_attributes``: a
-    binary's masses or spins, a burst's frequencies, length or noise) and can
-    take more than one value: waveforms alike but for the amplitude and the
-    phase each detector receives them with are what other skies and
-    polarisations give, and a draw of one value is the same in every detector,
-    so a mismatch in those draws alone is refused. The presence and the
+    binary's masses or spins, a burst's frequencies, length or noise) and
+    differs between every two detectors with probability one (a content
+    draw, or a parameter of a continuous distribution): waveforms alike but
+    for the amplitude and the phase each detector receives them with are what
+    other skies and polarisations give, a draw of one value is the same in
+    every detector, and one of a few values (a CHOICE, a POW_TWO, an
+    integer's) the same in every detector with nonzero probability, so a
+    mismatch in those draws alone is refused. The presence and the
     placement are shared, so the signal's extent, which placement reads, is
     every detector's: a draw that moves it (the generator's
     ``extent_attributes``: a burst's length, and a white-noise burst's band
@@ -442,7 +462,8 @@ class MismatchedWaveforms(Violation):
     def check(self, hard_example):
         """
         Refuse by name a mismatch of draws its generator does not make, or
-        that leave the shape alone, take one value or move the extent, a
+        that leave the shape alone, can come out equal in every detector or
+        move the extent, a
         correlation of differing parameters, and a scaling other than a
         network SNR (see the class).
         """
@@ -474,12 +495,13 @@ class MismatchedWaveforms(Violation):
                 "amplitude and the phase each detector receives them with are what other skies and "
                 "polarisations give. Differ in at least one of those."
             )
-        if all(_draws_one_value(generator, draw) for draw in shape):
+        if not any(_draws_apart(generator, draw) for draw in shape):
             raise ValueError(
                 f"MismatchedWaveforms of a {type(generator).__name__} differs in {list(self.differ)}, but "
-                f"each of its draws that changes the shape ({', '.join(shape)}) has one value only, so every "
-                "detector would receive one waveform: a real signal. Give one of them a distribution of more "
-                "than one value."
+                f"each of its draws that changes the shape ({', '.join(shape)}) can come out equal in every detector "
+                "(a draw of one value, or of a few: a CHOICE, a POW_TWO or an integer's), so with nonzero "
+                "probability every detector would receive one waveform, a real signal labelled a mismatch. Give one "
+                "of them a continuous distribution (a UNIFORM, NORMAL or LOG of floats over more than a point)."
             )
         moving = [draw for draw in self.differ
                   if draw in generator.extent_attributes and not _draws_one_value(generator, draw)]

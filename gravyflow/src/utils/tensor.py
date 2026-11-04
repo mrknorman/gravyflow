@@ -53,6 +53,25 @@ class Distribution:
                 object.__setattr__(self, "min_", low)
                 object.__setattr__(self, "max_", high)
 
+    @property
+    def continuous(self) -> bool:
+        """
+        Whether no value has a probability of its own, so that two
+        independent draws differ with probability one: a UNIFORM, NORMAL or
+        LOG of floats over more than a point. A CONSTANT, a CHOICE, a POW_TWO,
+        a distribution of integers or one whose support is a point gives two
+        draws one value with nonzero probability.
+        """
+        type_ = DistributionType[self.type_.upper()] if isinstance(self.type_, str) else self.type_
+        if self.dtype == int or type_ not in (
+                DistributionType.UNIFORM, DistributionType.NORMAL, DistributionType.LOG):
+            return False
+        if type_ is DistributionType.NORMAL and self.std == 0:
+            return False
+        low = float("-inf") if self.min_ is None else self.min_
+        high = float("inf") if self.max_ is None else self.max_
+        return low < high
+
     def sample(
         self,
         num_samples : int,
