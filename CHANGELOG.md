@@ -152,13 +152,16 @@ repository before it may need the changes below.
   generator's signals, so it differs in its violation alone. Its scaling method, injection chance, padding,
   allow_partially_out_of_window, sky and reference time are its generator's when it is built: the injection layer reads
   them from it, and they fingerprint it beside its generator and violation. It compares by what fingerprints it, its
-  specification, as an `IncoherentGenerator` does. Its independent_waveforms, shape_attributes, extent_attributes and
-  repeats_when_cut are its generator's. Its generator and violation may be reassigned after it is built, and its
-  generator changed (as the validator changes a dataset's generators): each is checked to be what it can be (a coherent
-  generator, not an `IncoherentGenerator` or another hard example; a `gf.Violation`) as it is assigned, and every other
-  check it makes of its generator, its own settings and its network runs wherever it is used, as its network is set
-  (when it is built, and as a dataset binds it) and as each batch is projected. `gf.Violation`, the base, a subclass
-  that names no code, and one whose code is NONE, which would label its examples real signals, are refused by name.
+  specification, as an `IncoherentGenerator` does. Its independent_waveforms, distributed_attributes, shape_attributes,
+  extent_attributes and repeats_when_cut are its generator's, read from it wherever they are used. So a hard example
+  whose generator is reassigned after it is built fingerprints with the new generator's distributed_attributes, where it
+  once kept a copy of the old one's, taken when it was built. Its generator and violation may be reassigned after it is
+  built, and its generator changed (as the validator changes a dataset's generators): each is checked to be what it can
+  be (a coherent generator, not an `IncoherentGenerator` or another hard example; a `gf.Violation`) as it is assigned,
+  and every other check it makes of its generator, its own settings and its network runs wherever it is used, as its
+  network is set (when it is built, and as a dataset binds it) and as each batch is projected. `gf.Violation`, the base,
+  a subclass that names no code, and one whose code is NONE, which would label its examples real signals, are refused by
+  name.
 
 - **Hard examples: a wrong delay.** `gf.WrongDelay(margin_seconds)` shifts one present detector's copy so that its delay
   from another present detector, the example's own pair, is their light-travel time plus a margin drawn per example, of
