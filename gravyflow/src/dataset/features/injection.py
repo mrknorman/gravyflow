@@ -2353,11 +2353,11 @@ class InjectionGenerator:
             # A hard example's change to the projection: each copy's shift
             # beyond its delay.
             violation_shifts = None if generator.violation is None else generator.draw_projection(
-                    network, time_delays, generator_streams, label, num_inj,
-                    offsets_seconds=shift_seconds,
-                    extent_seconds=self._generator_parameter(injection_parameters, SIGNAL_EXTENT, i),
-                    window_seconds=dur,
-                )
+                network, time_delays, generator_streams, label, num_inj,
+                offsets_seconds=shift_seconds,
+                extent_seconds=self._generator_parameter(injection_parameters, SIGNAL_EXTENT, i),
+                window_seconds=dur,
+            )
             if violation_shifts is not None:
                 violation_shifts = ops.convert_to_tensor(violation_shifts, dtype="float32")
                 time_delays = time_delays + violation_shifts

@@ -347,8 +347,8 @@ class WrongDelay(Violation):
             {SIGNAL_EXTENT: extent_seconds}, window_seconds, int(np.size(arrival)))
 
         def outside(sign):
-            copy = arrival + sign * reach
-            return np.maximum(low - copy, 0.0) + np.maximum(copy - high, 0.0)
+            shifted = arrival + sign * reach
+            return np.maximum(low - shifted, 0.0) + np.maximum(shifted - high, 0.0)
 
         return np.where(outside(drawn) <= outside(-drawn), drawn, -drawn)
 
@@ -424,7 +424,8 @@ class MismatchedWaveforms(Violation):
         differ = tuple(differ) if isinstance(differ, (tuple, list)) else ()
         if not differ or not all(isinstance(name, str) for name in differ):
             raise ValueError(
-                f"MismatchedWaveforms differs in at least one named draw (a parameter, or 'noise'), not {self.differ!r}."
+                "MismatchedWaveforms differs in at least one named draw (a parameter, or 'noise'), "
+                f"not {self.differ!r}."
             )
         object.__setattr__(self, "differ", differ)
         if self.correlation is not None:
@@ -975,8 +976,9 @@ class HardExampleGenerator(WaveformGenerator):
         The violation's gain for each detector's copy, (Batch, Detectors), or
         None (``Violation.detector_balance``: a mismatched waveform's
         detectors balanced to one source's loudness), its scaling checked as
-        the batch was projected (``draw_projection``). ``polarisations`` is (Batch, Detectors, 2, Time) for one waveform per
-        detector, the window the injection layer crops centred in it.
+        the batch was projected (``draw_projection``). ``polarisations`` is
+        (Batch, Detectors, 2, Time) for one waveform per detector, the window
+        the injection layer crops centred in it.
         """
         return self.violation.detector_balance(polarisations, background, sample_rate_hertz,
                                                onsource_duration_seconds)
