@@ -951,6 +951,40 @@ def test_a_coherence_violation_needs_more_detectors_than_its_generators_waveform
         assert min(taken[apart]) > 2.0 * max(coherent) and min(taken[apart]) > 1e-4, (name, violation, taken, coherent)
 
 
+def _direct(generator, outputs, window=1.0):
+    """One batch of ``generator`` through a gf.InjectionGenerator of its own, outside any dataset: its labels."""
+    injector = gf.InjectionGenerator([generator])
+    streams = injector.streams(0)
+    injections, mask, parameters = injector.generate(
+        streams, sample_rate_hertz=SAMPLE_RATE, onsource_duration_seconds=window, crop_duration_seconds=0.5,
+        num_examples_per_batch=BATCH)
+    noise = np.random.default_rng(0)
+    num_detectors = int(generator.network.num_detectors)
+    onsource = noise.normal(size=(BATCH, num_detectors, int((window + 1.0) * SAMPLE_RATE))).astype(np.float32)
+    offsource = noise.normal(size=(BATCH, num_detectors, int(4.0 * SAMPLE_RATE))).astype(np.float32)
+    _, _, labels = injector.add_injections_to_onsource(
+        injections, mask, onsource, offsource, parameters_to_return=list(outputs), onsource_duration_seconds=window,
+        injection_parameters=parameters, streams=streams)
+    return labels
+
+
+def test_what_cannot_label_or_hold_a_violation_is_refused_outside_a_dataset():
+    """
+    Where the label is made and where the copy is projected, not only when a dataset is built: an
+    IncoherentGenerator's VIOLATION, and a window that cannot hold a wrong delay's copy, through a
+    gf.InjectionGenerator alone.
+    """
+    two = gf.Network([gf.IFO.H1, gf.IFO.L1])
+    incoherent = gf.IncoherentGenerator([wnb(network=two), wnb(network=two)])
+    _direct(incoherent, [gf.ScalingTypes.SNR])
+    with pytest.raises(ValueError, match="IncoherentGenerator"):
+        _direct(incoherent, [RV.VIOLATION])
+    with pytest.raises(ValueError, match="WrongDelay hard example shifts its copy"):
+        _direct(gf.HardExampleGenerator(ringdown(network=two), gf.WrongDelay(0.9)), [RV.VIOLATION])
+    labels = _direct(gf.HardExampleGenerator(ringdown(network=two), gf.WrongDelay(0.01)), [RV.VIOLATION])
+    np.testing.assert_array_equal(np.asarray(labels[RV.VIOLATION]), float(gf.ViolationCode.WRONG_DELAY))
+
+
 def test_a_violation_is_labelled_by_kind_alone():
     """
     VIOLATION labels what an example is; which detector's copy of a two-detector wrong delay was moved is no label,
@@ -973,7 +1007,7 @@ def test_what_cannot_label_or_hold_a_violation_is_refused_when_built():
     """
     An IncoherentGenerator's VIOLATION is refused when the dataset is built, not at its first batch; a hard example
     is no component of an IncoherentGenerator, which would drop its violation; and a wrong delay's window is refused
-    once, when the dataset is built, its placement range the generator's.
+    when the dataset is built, its placement range the generator's.
     """
     with pytest.raises(ValueError, match="IncoherentGenerator"):
         dataset([gf.IncoherentGenerator([wnb(), wnb(), wnb()])])

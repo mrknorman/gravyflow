@@ -739,13 +739,15 @@ class HardExampleGenerator(WaveformGenerator):
 
     def check_window(self, window_seconds : float) -> None:
         """
-        Refuse by name, when the dataset is built, a window that cannot hold a
-        shifted copy (``reach_seconds``, a wrong delay's) whatever the
-        placement: its copy is kept where real signals arrive
-        (``arrival_bounds_seconds``, gf.WrongDelay), and its partner's arrival
-        can lie anywhere there, so that range must be twice the farthest shift
-        wide for any signal of the generator, its longest put either side of
-        its reference time.
+        Refuse by name a window that cannot hold a shifted copy
+        (``reach_seconds``, a wrong delay's) whatever the placement: its copy
+        is kept where real signals arrive (``arrival_bounds_seconds``,
+        gf.WrongDelay), and its partner's arrival can lie anywhere there, so
+        that range must be twice the farthest shift wide for any signal of the
+        generator, its longest put either side of its reference time. Checked
+        when a dataset is built, and at every projection (``draw_projection``),
+        where the window meets the violation, so a gf.InjectionGenerator used
+        alone refuses it too.
         """
         low, high = self.placement_range_seconds(window_seconds)
         reach = self.violation.reach_seconds(self.network)
@@ -818,8 +820,11 @@ class HardExampleGenerator(WaveformGenerator):
         A wrong delay keeps its copy in the window (``window_seconds`` long)
         by its direction, from each example's placement, ``offsets_seconds``
         (Batch,), its reference time's offset from the window's centre, and
-        the signal's ``extent_seconds`` (Batch, 2), before and after it.
+        the signal's ``extent_seconds`` (Batch, 2), before and after it; a
+        window that cannot hold its copy is refused (``check_window``).
         """
+        if window_seconds is not None:
+            self.check_window(float(window_seconds))
         num_detectors = int(ops.shape(time_delays)[-1])
         present = np.asarray(network.present, dtype=np.float64) if isinstance(network, ExampleNetworks) \
             else np.ones((num_examples, num_detectors))

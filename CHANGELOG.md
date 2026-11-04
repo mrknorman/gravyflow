@@ -154,7 +154,8 @@ repository before it may need the changes below.
   (`HardExampleGenerator.arrival_bounds_seconds`: the placement bounds, which keep the whole signal the detector
   margin from the window's edges and inside the padding, widened by that margin), by its direction: the drawn one,
   or the other where only that keeps it there. So a copy reaches no part of the window a real arrival does not; a
-  window or padding too narrow for that is refused by name when the dataset is built.
+  window or padding too narrow for that is refused by name when the dataset is built and as the copy is projected,
+  so a `gf.InjectionGenerator` used alone refuses it too.
 
 - **Hard examples: one detector.** `gf.OneDetector()` puts the signal in exactly one present detector. It is scaled
   as the real signal is, to its target over every present detector, and only then are the other detectors' copies
@@ -192,7 +193,7 @@ repository before it may need the changes below.
   `num_present` that can present fewer is refused by name when the dataset is built. So are a hard example as a
   component of a `gf.IncoherentGenerator`, which would drop its violation, and `VIOLATION` with an
   `IncoherentGenerator`, whose detectors' waveforms differ though it names no violation (a labelled mismatch is
-  `gf.MismatchedWaveforms`).
+  `gf.MismatchedWaveforms`), wherever the label is made.
 
 - **Hard examples: labels and streams.** `ReturnVariables.VIOLATION` (B, G) gives each generator's
   `gf.ViolationCode` (NONE, 0, for a real signal), float32, NaN where the generator injected nothing (its

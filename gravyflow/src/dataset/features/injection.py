@@ -361,7 +361,7 @@ class ReturnVariables(Enum):
     # (gf.HardExampleGenerator), so evaluation can score each kind: float32,
     # NaN where the generator injected nothing (its injection_chance). Refused
     # with an IncoherentGenerator, whose detectors' waveforms differ though it
-    # names no violation.
+    # names no violation (WaveformGenerator.violation_code).
     VIOLATION = ReturnVariable(28, (BATCH, GENERATOR))
 
     def __lt__(self, other):
@@ -425,6 +425,15 @@ class WaveformGenerator:
 
     # A real signal violates nothing; a gf.HardExampleGenerator's violation.
     violation : ClassVar = None
+
+    def violation_code(self) -> int:
+        """
+        What its signal is, as ``ReturnVariables.VIOLATION`` labels it: its
+        violation's gf.ViolationCode, NONE (0) for a real signal. Read
+        wherever the label is made, and when a dataset that returns it is
+        built, so a generator whose signal cannot be labelled refuses there.
+        """
+        return 0 if self.violation is None else int(self.violation.code)
 
     # The draws that change a waveform's shape, not only the amplitude and the
     # phase each detector receives it with, as other skies and polarisations
@@ -1528,6 +1537,14 @@ class IncoherentGenerator(WaveformGenerator):
         self.allow_partially_out_of_window = first.allow_partially_out_of_window
         self.network = first.network
 
+    def violation_code(self) -> int:
+        """Refused by name: its detectors' waveforms differ, though in what is not checked (see the class)."""
+        raise ValueError(
+            "An IncoherentGenerator gives each detector a waveform of its own, which no real signal does, but it is "
+            "no hard example whose violation is known: VIOLATION cannot label it. Use gf.HardExampleGenerator with "
+            "gf.MismatchedWaveforms, or leave it out."
+        )
+
     def specification(self) -> dict:
         """
         The injection by content (``utils.fingerprint.canonical`` reads it):
@@ -2283,11 +2300,10 @@ class InjectionGenerator:
 
                 generator_labels[ReturnVariables.CENTRAL_TIME] = normalized_time
 
-            # What the signal is (an IncoherentGenerator's is refused when the
-            # dataset is built).
+            # What the signal is (an IncoherentGenerator's is refused).
             if parameters_to_return and ReturnVariables.VIOLATION in parameters_to_return:
-                code = 0 if generator.violation is None else int(generator.violation.code)
-                generator_labels[ReturnVariables.VIOLATION] = np.full((num_inj,), code, dtype=np.float32)
+                generator_labels[ReturnVariables.VIOLATION] = np.full(
+                    (num_inj,), generator.violation_code(), dtype=np.float32)
 
 
             scaling_dist = gf.Curriculum.resolve(scaling_method.value, epoch)

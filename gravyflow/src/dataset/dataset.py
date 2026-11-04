@@ -1248,14 +1248,9 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
                         f"{type(generator).__name__} has no scaling_method; give it a "
                         "gf.ScalingMethod to inject it into a dataset."
                     )
-                # What each signal is: an IncoherentGenerator's is not known.
-                if gf.ReturnVariables.VIOLATION in self.variables_to_return \
-                        and isinstance(generator, gf.IncoherentGenerator):
-                    raise ValueError(
-                        "An IncoherentGenerator gives each detector a waveform of its own, which no real signal "
-                        "does, but it is no hard example whose violation is known: VIOLATION cannot label it. Use "
-                        "gf.HardExampleGenerator with gf.MismatchedWaveforms, or leave it out."
-                    )
+                # What each signal is, refused here where it cannot be labelled.
+                if gf.ReturnVariables.VIOLATION in self.variables_to_return:
+                    generator.violation_code()
                 # A hard example refuses a window that cannot hold its violation.
                 if generator.violation is not None:
                     generator.check_window(self.onsource_duration_seconds)
