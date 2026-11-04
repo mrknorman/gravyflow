@@ -2401,6 +2401,20 @@ class InjectionGenerator:
             # Determine target length from onsource
             target_num_samples = ops.shape(onsource)[-1]
 
+            # InjectionGenerator yields finite waveforms (it reports and
+            # zeroes non-finite samples).
+            raw = ops.convert_to_tensor(raw_waveforms, dtype="float32")
+
+            # A hard example's gain for each detector's copy, applied as it
+            # is projected: a mismatched waveform's detectors balanced to one
+            # source's loudness (gf.MismatchedWaveforms).
+            balance = None
+            if generator.violation is not None:
+                start = (ops.shape(raw)[-1] - target_num_samples) // 2
+                balance = generator.detector_balance(
+                    raw[..., start:start + target_num_samples], scaling_background, sample_rate,
+                    onsource_duration_seconds)
+
             def project_and_crop(strain):
                 projected = network.project_wave(
                     strain,
@@ -2418,20 +2432,6 @@ class InjectionGenerator:
                     projected = projected * balance[..., None]
                 start = (ops.shape(projected)[-1] - target_num_samples) // 2
                 return projected[..., start:start + target_num_samples]
-
-            # InjectionGenerator yields finite waveforms (it reports and
-            # zeroes non-finite samples).
-            raw = ops.convert_to_tensor(raw_waveforms, dtype="float32")
-
-            # A hard example's gain for each detector's copy, applied as it
-            # is projected: a mismatched waveform's detectors balanced to one
-            # source's loudness (gf.MismatchedWaveforms).
-            balance = None
-            if generator.violation is not None:
-                start = (ops.shape(raw)[-1] - target_num_samples) // 2
-                balance = generator.detector_balance(
-                    raw[..., start:start + target_num_samples], scaling_background, sample_rate,
-                    onsource_duration_seconds)
 
             # The source's measures, from the whole generated buffer when the
             # generator recorded them.
