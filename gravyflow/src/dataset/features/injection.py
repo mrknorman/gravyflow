@@ -1523,7 +1523,9 @@ class IncoherentGenerator(WaveformGenerator):
     """
     One injection with its own waveform in each detector: component j's
     polarisations are projected onto detector j alone, so its network has
-    as many detectors as it has components.
+    as many detectors as it has components. Its components, coherent
+    generators and never hard examples, are held as a tuple and checked as
+    they are assigned, when it is built or after, as its network is.
 
     The components are one signal: one presence (drawn once, from this
     generator's ``chance`` stream, with its injection_chance), one placement,
@@ -1547,18 +1549,8 @@ class IncoherentGenerator(WaveformGenerator):
     refused by name with it. A labelled mismatch is gf.HardExampleGenerator
     with gf.MismatchedWaveforms.
     """
-    component_generators : List[WaveformGenerator]
-
     def __init__(self, component_generators, name : Optional[str] = None):
-        self.component_generators = list(component_generators)
-        if not self.component_generators:
-            raise ValueError("An IncoherentGenerator needs a component generator for each detector.")
-        if any(component.violation is not None for component in self.component_generators):
-            raise TypeError(
-                "An IncoherentGenerator's component is a coherent generator, not a hard example: its violation "
-                "(gf.HardExampleGenerator) would be dropped with its projection. A labelled mismatch is "
-                "gf.HardExampleGenerator with gf.MismatchedWaveforms."
-            )
+        self.component_generators = component_generators
         self.name = None if name is None else check_name(name, "generator name")
         first = self.component_generators[0]
         self.scaling_method = first.scaling_method
@@ -1575,6 +1567,29 @@ class IncoherentGenerator(WaveformGenerator):
             "no hard example whose violation is known: VIOLATION cannot label it. Use gf.HardExampleGenerator with "
             "gf.MismatchedWaveforms, or leave it out."
         )
+
+    @property
+    def component_generators(self) -> Tuple[WaveformGenerator, ...]:
+        """Its components, in detector order: a tuple, so none is added or replaced in place."""
+        return self._component_generators
+
+    @component_generators.setter
+    def component_generators(self, component_generators):
+        # Checked on every assignment, not only when it is built: a hard example's violation would be dropped with
+        # its projection, and a network of another size would broadcast components onto the wrong detectors.
+        component_generators = tuple(component_generators)
+        if not component_generators:
+            raise ValueError("An IncoherentGenerator needs a component generator for each detector.")
+        if any(component.violation is not None for component in component_generators):
+            raise TypeError(
+                "An IncoherentGenerator's component is a coherent generator, not a hard example: its violation "
+                "(gf.HardExampleGenerator) would be dropped with its projection. A labelled mismatch is "
+                "gf.HardExampleGenerator with gf.MismatchedWaveforms."
+            )
+        network = getattr(self, "_network", None)
+        if network is not None:
+            self._check_network_size(network, len(component_generators))
+        self._component_generators = component_generators
 
     def specification(self) -> dict:
         """
@@ -1595,14 +1610,19 @@ class IncoherentGenerator(WaveformGenerator):
         # of another size would broadcast components onto the wrong detectors.
         network = self.init_network(network, self.geometry_stream())
         if network is not None:
-            num_detectors = int(np.asarray(network.num_detectors).ravel()[0])
-            if num_detectors != len(self.component_generators):
-                raise ValueError(
-                    f"An IncoherentGenerator projects component j onto detector j: its "
-                    f"{len(self.component_generators)} components need a network of as many "
-                    f"detectors, not {num_detectors}."
-                )
+            self._check_network_size(network, len(self.component_generators))
         self._network = network
+
+    @staticmethod
+    def _check_network_size(network, num_components : int) -> None:
+        """Refuse by name a network whose detectors are not one for each of ``num_components`` components."""
+        num_detectors = int(np.asarray(network.num_detectors).ravel()[0])
+        if num_detectors != num_components:
+            raise ValueError(
+                f"An IncoherentGenerator projects component j onto detector j: its "
+                f"{num_components} components need a network of as many "
+                f"detectors, not {num_detectors}."
+            )
 
     def get_max_generated_duration(self):
         return max(float(component.get_max_generated_duration()) for component in self.component_generators)

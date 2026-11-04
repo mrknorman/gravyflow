@@ -213,7 +213,8 @@ repository before it may need the changes below.
   or a `gf.Detectors` of bundled detectors and slots at fixed sites, every subset of its fewest present detectors
   counted) is refused by name when it is set, and where a slot's geometry is drawn, an example with fewer as it is
   projected (`gf.Detectors.fixed_response` gives a fixed one's tensors). So are a hard example as a component of a
-  `gf.IncoherentGenerator`, which would drop its violation, and `VIOLATION` with an `IncoherentGenerator`, whose detectors' waveforms differ though it names no
+  `gf.IncoherentGenerator`, which would drop its violation (its components are held as a tuple and checked as they
+  are assigned, when it is built or after), and `VIOLATION` with an `IncoherentGenerator`, whose detectors' waveforms differ though it names no
   violation (a labelled mismatch is `gf.MismatchedWaveforms`), wherever the label is made.
 
 - **Hard examples: labels and streams.** `ReturnVariables.VIOLATION` (B, G) gives each generator's

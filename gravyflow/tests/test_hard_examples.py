@@ -1246,6 +1246,28 @@ def test_a_hard_examples_generator_and_violation_are_checked_as_they_are_assigne
     assert hard.generator is shorter
 
 
+def test_an_incoherent_generators_components_are_checked_as_they_are_assigned():
+    """
+    Its components are an attribute the caller may reassign after it is built: a hard example among them, whose
+    violation would be dropped with its projection, or a number of them its network does not have, is refused by name
+    as they are assigned, and they are held as a tuple, so none is added or replaced in place.
+    """
+    network = gf.Network(list(NETWORK))
+    incoherent = gf.IncoherentGenerator([wnb(network=network), wnb(), wnb()])
+    with pytest.raises(TypeError, match="hard example"):
+        incoherent.component_generators = [gf.HardExampleGenerator(wnb(), gf.WrongDelay(0.01)), wnb(), wnb()]
+    with pytest.raises(ValueError, match="a component generator for each detector"):
+        incoherent.component_generators = []
+    with pytest.raises(ValueError, match="2 components need a network of as many detectors, not 3"):
+        incoherent.component_generators = [wnb(), wnb()]
+    assert len(incoherent.component_generators) == 3
+    with pytest.raises(TypeError):
+        incoherent.component_generators[0] = gf.HardExampleGenerator(wnb(), gf.WrongDelay(0.01))
+    components = (wnb(), wnb(duration_seconds=constant(0.05)), wnb())
+    incoherent.component_generators = list(components)
+    assert incoherent.component_generators == components
+
+
 #: A hard example of each violation, from the generator it suits.
 STREAM_CASES = {
     "wrong delay": lambda: gf.HardExampleGenerator(wnb(), gf.WrongDelay(uniform(0.01, 0.02)), name="hard"),
