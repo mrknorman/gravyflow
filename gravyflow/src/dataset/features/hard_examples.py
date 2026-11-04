@@ -107,8 +107,7 @@ class Violation:
         if not isinstance(code, ViolationCode):
             raise TypeError(
                 f"{cls.__name__} names no code (a gf.ViolationCode), so it labels nothing: gf.Violation is the base "
-                "of the violations, not one. Use gf.WrongDelay, gf.MismatchedWaveforms or gf.TimeReversed, or give "
-                "a subclass its code."
+                f"of the violations, not one. Use one of them ({_usable_violations()}), or give a subclass its code."
             )
         if code is ViolationCode.NONE:
             raise TypeError(
@@ -172,6 +171,22 @@ class Violation:
         from the violation's streams (``stream(name)``): None, no shift.
         """
         return None
+
+
+def _usable_violations() -> str:
+    """
+    The violations a hard example takes, by name: every subclass of
+    Violation, at any depth, whose code (its own or inherited) is a
+    gf.ViolationCode other than NONE, the rule ``Violation.__new__`` builds by.
+    """
+    usable, pending = [], list(Violation.__subclasses__())
+    while pending:
+        violation = pending.pop(0)
+        pending.extend(violation.__subclasses__())
+        code = getattr(violation, "code", None)
+        if isinstance(code, ViolationCode) and code is not ViolationCode.NONE and violation.__name__ not in usable:
+            usable.append(violation.__name__)
+    return ", ".join(usable)
 
 
 @dataclass(frozen=True)
@@ -784,8 +799,7 @@ class HardExampleGenerator(WaveformGenerator):
         # Checked on every assignment, as its generator is.
         if not isinstance(violation, Violation):
             raise TypeError(
-                f"A HardExampleGenerator's violation is a gf.Violation "
-                f"({', '.join(v.__name__ for v in Violation.__subclasses__())}), not {violation!r}."
+                f"A HardExampleGenerator's violation is a gf.Violation ({_usable_violations()}), not {violation!r}."
             )
         self._violation = violation
 

@@ -799,6 +799,27 @@ def test_a_generator_built_from_others_is_equal_by_its_specification():
         assert incoherent != other, other
 
 
+def test_the_usable_violations_are_named_by_their_code():
+    """
+    A refusal of what is no violation names the violations a hard example takes, every subclass of gf.Violation with
+    a code, a subclass's subclass among them, and none that names no code, which is refused.
+    """
+    @dataclasses.dataclass(frozen=True)
+    class Uncoded(gf.Violation):
+        pass
+
+    @dataclasses.dataclass(frozen=True)
+    class Later(gf.WrongDelay):
+        pass
+
+    for refuse in (lambda: gf.HardExampleGenerator(wnb(), "late"), Uncoded, gf.Violation):
+        with pytest.raises(TypeError) as refusal:
+            refuse()
+        message = str(refusal.value).split("names no code")[-1]
+        assert all(name in message for name in ("WrongDelay", "MismatchedWaveforms", "TimeReversed", "Later")), message
+        assert "Uncoded" not in message, message
+
+
 def test_mismatched_waveforms_of_nothing_are_refused_by_name():
     for differ in (None, (), (1,), ("noise", None)):
         with pytest.raises(ValueError, match="at least one named draw"):
