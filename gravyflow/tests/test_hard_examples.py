@@ -13,7 +13,7 @@ import pytest
 import scipy.optimize
 
 import gravyflow as gf
-from gravyflow.src.dataset.conditioning.detector import C
+from gravyflow.src.dataset.conditioning.detector import C, ExampleNetworks
 from gravyflow.src.dataset.features.hard_examples import _MismatchedStreams
 from gravyflow.src.dataset.features.injection import SIGNAL_EXTENT
 from gravyflow.src.rng.consumers import check_consumer
@@ -390,9 +390,9 @@ def test_a_mismatched_binarys_detectors_carry_one_sources_loudness():
     Two co-located, co-aligned detectors receive one real signal at one SNR. Each detector's chirp of a mismatched
     binary (masses of its own) is balanced to one source's noise-weighted loudness, so the two still receive it at
     one SNR: its SNR in each detector differs from a real signal's only through the antenna pattern, never through
-    its masses' loudness.
+    its masses' loudness. H1 beside them gives the network the second independent response a mismatch needs.
     """
-    twins = [gf.DetectorSlot.at(gf.Site.I1, gf.IFO.H1, name=name) for name in ("A", "B")]
+    twins = [*(gf.DetectorSlot.at(gf.Site.I1, gf.IFO.H1, name=name) for name in ("A", "B")), gf.IFO.H1]
     binary = dict(mass_1_msun=uniform(15.0, 80.0), mass_2_msun=uniform(15.0, 80.0),
                   scaling_method=gf.ScalingMethod(constant(TARGET_SNR), gf.ScalingTypes.SNR))
     spreads = {}
@@ -896,6 +896,87 @@ def test_a_coherence_violation_needs_more_detectors_than_its_generators_waveform
         # A binary's masses drawn 0.2 % of their range apart leave 3e-5, 7 % apart 3e-4, 15 % apart 2e-3; a
         # chirplet's start frequencies 4 % apart leave 2e-4.
         assert min(taken[apart]) > 2.0 * max(coherent) and min(taken[apart]) > 1e-4, (name, violation, taken, coherent)
+
+
+def _local_axes(latitude, longitude):
+    """The north, east and up unit vectors at a vertex of geodetic ``latitude`` and ``longitude``, Earth-fixed."""
+    north = np.array([-np.sin(latitude) * np.cos(longitude), -np.sin(latitude) * np.sin(longitude), np.cos(latitude)])
+    east = np.array([-np.sin(longitude), np.cos(longitude), 0.0])
+    up = np.array([np.cos(latitude) * np.cos(longitude), np.cos(latitude) * np.sin(longitude), np.sin(latitude)])
+    return north, east, up
+
+
+def antipodal_copy(ifo, name):
+    """
+    A fixed slot near the antipode of ``ifo``'s vertex whose arms lie along ``ifo``'s, so its response tensor is
+    ``ifo``'s up to its sign: seen from above, the antipode turns the arms' order, so its x arm is ``ifo``'s y arm.
+    """
+    network = gf.Network([ifo])
+    location = np.asarray(network.location, np.float64)[0]
+    latitude = -np.arcsin(location[2] / np.linalg.norm(location))
+    longitude = float(np.arctan2(location[1], location[0]) + np.pi)
+    north, east, up = _local_axes(latitude, longitude)
+
+    def pointing(arm):
+        arm = np.asarray(arm, np.float64)[0]
+        return float(np.arctan2(arm @ east, arm @ north)), float(np.arcsin(np.clip(arm @ up, -1.0, 1.0)))
+
+    (x_angle, x_altitude), (y_angle, y_altitude) = pointing(network.y_vector), pointing(network.x_vector)
+    return gf.DetectorSlot(name, ifo, latitude_radians=float(latitude), longitude_radians=longitude,
+                           x_angle_radians=x_angle, opening_angle_radians=float(np.mod(x_angle - y_angle, 2 * np.pi)),
+                           x_altitude_radians=x_altitude, y_altitude_radians=y_altitude)
+
+
+#: Networks of three detectors whose responses span two dimensions: H1 with a copy of its response on the far side
+#: of the Earth and L1; H1 with two slots at one site; the Einstein Telescope's triangle, whose tensors sum to zero.
+DEPENDENT = {
+    "antipodal H1": [gf.IFO.H1, antipodal_copy(gf.IFO.H1, "A1"), gf.IFO.L1],
+    "twin slots": [gf.IFO.H1, gf.DetectorSlot.at(gf.Site.I1, gf.IFO.H1, "Ia"),
+                   gf.DetectorSlot.at(gf.Site.I1, gf.IFO.H1, "Ib")],
+    "Einstein Telescope": [gf.DetectorSlot.at(site, gf.IFO.V1) for site in (gf.Site.E1, gf.Site.E2, gf.Site.E3)],
+}
+
+
+@pytest.mark.parametrize("violation", [gf.WrongDelay(0.005), gf.MismatchedWaveforms("noise")],
+                         ids=["wrong delay", "mismatch"])
+@pytest.mark.parametrize("network", DEPENDENT)
+def test_a_network_counts_the_rank_of_its_responses(network, violation):
+    """
+    A network's detectors count against its generator's independent waveforms as the rank of the span of their
+    response tensors: detectors of equal, opposite or dependent responses count once, however far apart. Each of
+    these networks counts two, so a white-noise burst's two independent waveforms are refused on it by name when it
+    is set, and one plus polarisation, which needs two, is taken.
+    """
+    with pytest.raises(ValueError, match="needs 3 detectors present in every example, but its network can have 2"):
+        dataset([gf.HardExampleGenerator(wnb(), violation)], ifos=DEPENDENT[network])
+    dataset([gf.HardExampleGenerator(wnb(polarization_eccentricity=constant(1.0)), violation)],
+            ifos=DEPENDENT[network])[0]
+
+
+def test_generic_networks_count_every_detector():
+    """Detectors at distinct sites count one each: H1, L1 and V1 three, two of them two."""
+    for violation in (gf.WrongDelay(0.005), gf.MismatchedWaveforms("noise")):
+        gf.HardExampleGenerator(wnb(network=gf.Network([gf.IFO.H1, gf.IFO.L1, gf.IFO.V1])), violation)
+        with pytest.raises(ValueError, match="but its network can have 2"):
+            gf.HardExampleGenerator(wnb(network=gf.Network([gf.IFO.H1, gf.IFO.V1])), violation)
+
+
+def test_a_fixed_networks_fewest_present_detectors_are_counted_by_their_worst_subset():
+    """Of H1, its antipodal copy and L1, two present can be H1 and its copy, of one response: one counts."""
+    ifos = gf.Detectors(DEPENDENT["antipodal H1"], num_present=uniform(2, 3, int))
+    with pytest.raises(ValueError, match="needs 2 detectors present in every example, but its network can have 1"):
+        dataset([gf.HardExampleGenerator(binary(), gf.WrongDelay(0.005))], ifos=ifos)
+    dataset([gf.HardExampleGenerator(binary(), gf.WrongDelay(0.005))], ifos=DEPENDENT["antipodal H1"])
+
+
+def test_an_example_is_counted_as_it_is_projected():
+    """Where a network is drawn per example, each example's own detectors are counted as it is projected."""
+    examples = ExampleNetworks.of_network(gf.Network([gf.IFO.H1, gf.IFO.L1]), BATCH)
+    delays = np.zeros((BATCH, 2), np.float32)
+    with pytest.raises(ValueError, match="but an example of this batch has 2"):
+        gf.HardExampleGenerator(wnb(), gf.WrongDelay(0.005)).draw_projection(
+            examples, delays, gf.SeedTree(5).batch("train", 0, 0), "hard", BATCH, offsets_seconds=np.zeros(BATCH),
+            extent_seconds=np.full((BATCH, 2), 0.05), window_seconds=1.0)
 
 
 def test_a_precessing_binary_carries_two_independent_waveforms():

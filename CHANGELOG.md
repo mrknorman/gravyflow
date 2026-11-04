@@ -187,13 +187,16 @@ repository before it may need the changes below.
 - **Hard examples: the networks that can hold one.** Each generator declares the independent waveforms its
   polarisations carry (`independent_waveforms`: 1 for an aligned-spin binary, sine-Gaussian, chirplet, ringdown or
   periodic wave; 2 for a binary that can precess, whose cross polarisation is no quadrature of its plus, and a
-  white-noise burst unless its eccentricity is 1 alone), since that many detectors receive any waveforms in them.
-  So a wrong delay or a mismatch needs one more detector present, a reversal one
-  (`Violation.fewest_detectors`), counted as the violation counts them (`Violation.distinct_detectors`: co-located
-  detectors of one response once for a wrong delay, and every detector for a mismatch, whose own waveforms detectors
-  alike only make plainer),
-  and a network or `num_present` that can present fewer is refused by name when it is set, an example with fewer as
-  it is projected. So are a hard example as a component of a `gf.IncoherentGenerator`, which would drop its
+  white-noise burst unless its eccentricity is 1 alone), since that many detectors of independent responses receive
+  any waveforms in them. So a wrong delay or a mismatch needs one more independent detector present, a reversal one
+  (`Violation.fewest_detectors`). Detectors count as the rank of the span of their response tensors, to a singular
+  value of 1e-6: detectors of equal, opposite or dependent responses count once, however far apart (H1 with a slot
+  of H1's arms on the far side of the Earth; the Einstein Telescope's triangle, whose three tensors sum to zero, counts
+  two). The count is the safe one: it also refuses some networks where dependent detectors would show a violation
+  plainly (two co-located detectors holding different waveforms). A network whose geometry is fixed (a `gf.Network`,
+  or a `gf.Detectors` of bundled detectors and slots at fixed sites, every subset of its fewest present detectors
+  counted) is refused by name when it is set, and where a slot's geometry is drawn, an example with fewer as it is
+  projected (`gf.Detectors.fixed_response` gives a fixed one's tensors). So are a hard example as a component of a `gf.IncoherentGenerator`, which would drop its
   violation, and `VIOLATION` with an `IncoherentGenerator`, whose detectors' waveforms differ though it names no
   violation (a labelled mismatch is `gf.MismatchedWaveforms`), wherever the label is made.
 

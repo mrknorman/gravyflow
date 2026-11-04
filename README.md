@@ -178,8 +178,9 @@ waveform reversed in time, only for a binary, whose reversed chirp no binary mak
 NaN where the generator injected nothing. A network of no more detectors than the independent waveforms a generator's
 polarisations carry (`independent_waveforms`: one for an aligned-spin binary, two for a precessing one or a
 white-noise burst of independent polarisations) receives any waveforms in them, so a wrong delay or a mismatch needs
-one more detector present. A network that can present fewer is refused by name, detectors that receive one signal
-alike counted once where a real source could then give it.
+one more detector present, counted as the rank of the span of the detectors' response tensors (detectors of equal,
+opposite or dependent responses, as the Einstein Telescope's triangle, count once). A network that can present fewer
+is refused by name.
 
 ```python
 binary = gf.CBCGenerator(mass_1_msun=uniform(15.0, 80.0), mass_2_msun=uniform(15.0, 80.0),

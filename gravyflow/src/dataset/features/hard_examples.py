@@ -26,6 +26,7 @@ are its own hooks, which the hard example calls in every case.
 """
 
 from copy import copy
+from itertools import combinations
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import ClassVar, Optional, Tuple, Union
@@ -100,26 +101,17 @@ class Violation:
 
     def fewest_detectors(self, generator : WaveformGenerator) -> int:
         """
-        The fewest detectors an example needs present for its signal to be
-        one no source of ``generator`` gives, a network that can present
-        fewer refused by name: by default, one more than the waveforms its
-        polarisations carry (``independent_waveforms``), since that many
-        detectors receive any waveforms in them, so a violation of the
-        detectors' coherence (a wrong delay, a mismatch) is a real signal
-        there.
+        The fewest independent detectors an example needs present for its
+        signal to be one no source of ``generator`` gives, counted as the
+        rank of the span of their response tensors (``_response_rank``), a
+        network that can present fewer refused by name: by default, one more
+        than the waveforms its polarisations carry
+        (``independent_waveforms``), since that many detectors of
+        independent responses receive any waveforms in them, so a violation
+        of the detectors' coherence (a wrong delay, a mismatch) is a real
+        signal there.
         """
         return generator.independent_waveforms + 1
-
-    def distinct_detectors(self, response, location, present : np.ndarray) -> np.ndarray:
-        """
-        How many of each example's present detectors (``present``, (Batch,
-        Detectors)) count towards ``fewest_detectors``, from their response
-        tensors (Detectors, 3, 3) or (Batch, Detectors, 3, 3) and locations
-        ((Batch,) Detectors, 3): (Batch,). By default co-located detectors of
-        one response, equal or opposite, count once, since every source gives
-        them one signal (up to its sign).
-        """
-        return _distinct(present, response, location)
 
     def check_scaling(self, scaling_method) -> None:
         """Refuse by name a scaling it cannot be given, when the hard example is built and as it is scaled."""
@@ -455,10 +447,6 @@ class MismatchedWaveforms(Violation):
         common[SIGNAL_EXTENT] = extents[0]
         return waveforms, common
 
-    def distinct_detectors(self, response, location, present):
-        """Every present detector: each holds a waveform of its own, which detectors alike only make plainer."""
-        return np.sum(np.asarray(present) > 0, axis=-1)
-
     def detector_balance(self, polarisations, background, sample_rate_hertz, onsource_duration_seconds):
         """
         Detector j's waveform rescaled so that its noise-weighted polarisation
@@ -567,31 +555,59 @@ def _extent(generator : WaveformGenerator, parameters, num_waveforms : int):
                  for side in generator.get_signal_extent_seconds(parameters))
 
 
-#: How far apart two detectors' response tensors (entries of order 1/2, held
-#: in float32 by a fixed network) and locations (metres) may be and still be
-#: one: a detector given twice, or slots at one site, are equal to the bit.
-_SAME_RESPONSE, _SAME_LOCATION_METERS = 1.0e-6, 1.0
+#: The least singular value of the present detectors' stacked response
+#: tensors (each of Frobenius norm about 0.7, held in float64 by a Network and
+#: ExampleNetworks) that counts as one more independent response. Responses
+#: equal, opposite or summing to another's fall below it by far: the Einstein
+#: Telescope's triangle, whose tensors sum to zero to 1e-7 in lal's float32
+#: arm angles, leaves 1e-10; the least of H1, L1 and V1's is 0.19.
+_INDEPENDENT_RESPONSE = 1.0e-6
 
 
-def _distinct(present, response, location=None) -> np.ndarray:
+def _response_rank(response, present) -> np.ndarray:
     """
-    Each example's number of present detectors (``present``, (Batch,
-    Detectors)) that differ from every other in their response tensor, up to
-    its sign, or, given ``location``, in their response or their location:
-    (Batch,).
+    Each example's number of independent present detectors: the rank of the
+    span of its present detectors' (``present``, (Batch, Detectors)) response
+    tensors, (Detectors, 3, 3) or (Batch, Detectors, 3, 3), to
+    ``_INDEPENDENT_RESPONSE``: (Batch,).
+
+    Every source gives a detector its response tensor's contraction with the
+    wave's, so detectors whose responses are equal, opposite or sums of
+    others' (a detector given twice, at one site or another; a triangle's
+    three, which sum to zero) add a detector but no response in which a
+    coherence violation shows where the others' would not: they count once.
+    The count is the safe one, so it may refuse a network where dependent
+    detectors would show a violation plainly (two detectors of one response
+    holding different waveforms).
     """
     present = np.asarray(present) > 0
     num_examples, num_detectors = present.shape
     response = np.broadcast_to(np.asarray(response, dtype=np.float64), (num_examples, num_detectors, 3, 3))
-    pairs = response[:, :, None] - response[:, None], response[:, :, None] + response[:, None]
-    same = np.min([np.max(np.abs(pair), axis=(-2, -1)) for pair in pairs], axis=0) <= _SAME_RESPONSE
-    if location is not None:
-        location = np.broadcast_to(np.asarray(location, dtype=np.float64), (num_examples, num_detectors, 3))
-        same &= np.max(np.abs(location[:, :, None] - location[:, None]), axis=-1) <= _SAME_LOCATION_METERS
-    # A detector counts unless one present before it is the same.
-    earlier = np.tril(np.ones((num_detectors, num_detectors), dtype=bool), -1)
-    repeated = np.any(same & earlier & present[:, None, :], axis=-1)
-    return np.sum(present & ~repeated, axis=-1)
+    rows = np.where(present[..., None], response.reshape(num_examples, num_detectors, 9), 0.0)
+    return np.linalg.matrix_rank(rows, tol=_INDEPENDENT_RESPONSE)
+
+
+def _fewest_independent(network) -> int:
+    """
+    The fewest independent detectors (``_response_rank``) an example of
+    ``network`` can present: every subset of its fewest present detectors
+    (``num_present``'s least, or all) counted, where its geometry is fixed
+    (a Network; a gf.Detectors of bundled detectors and slots at fixed
+    sites). Where a slot's geometry is drawn, the fewest present detectors,
+    the most they can count: each example is counted as it is projected.
+    """
+    if isinstance(network, gf.Detectors):
+        fewest = network.num_detectors if network.num_present is None else \
+            int(np.ceil(get_support_bounds(network.num_present, "num_present")[0]))
+        response = network.fixed_response()
+        if response is None:
+            return fewest
+    else:
+        response = np.asarray(network.response, dtype=np.float64)
+        fewest = len(response)
+    detectors = np.arange(len(response))
+    subsets = np.array([np.isin(detectors, subset) for subset in combinations(detectors, fewest)])
+    return int(np.min(_response_rank(response, subsets)))
 
 
 def _num_detectors(network) -> int:
@@ -639,11 +655,13 @@ class HardExampleGenerator(WaveformGenerator):
     in every case. Every example needs the detectors present that the
     violation asks of the generator (``Violation.fewest_detectors``: one
     more than the independent waveforms the generator's polarisations carry
-    for a wrong delay or a mismatch, one for a reversal), counted as the violation counts them
-    (``Violation.distinct_detectors``: detectors that receive one signal
-    alike may count once): a network or a num_present that can
-    give fewer is refused by name when it is set, and an example with fewer
-    as it is projected. TimeReversed takes only a binary, whose reversal
+    for a wrong delay or a mismatch, one for a reversal), counted as the rank of the span of their response tensors
+    (detectors of equal, opposite or dependent responses count once): a
+    network whose geometry is fixed (a Network, or gf.Detectors of bundled
+    detectors and fixed slots), or a num_present, that can give fewer is
+    refused by name when it is set, its fewest present detectors' every
+    subset counted; and where a slot's geometry is drawn, an example with
+    fewer is refused as it is projected. TimeReversed takes only a binary, whose reversal
     leaves its family (gf.TimeReversed).
 
     ``ReturnVariables.VIOLATION`` gives each example's ``violation.code``.
@@ -692,7 +710,7 @@ class HardExampleGenerator(WaveformGenerator):
         # Checked on every assignment, a dataset's binding included.
         network = self.init_network(network, self.geometry_stream())
         if network is not None:
-            self._check_detectors(self._fewest_present(network), "its network can have")
+            self._check_detectors(_fewest_independent(network), "its network can have")
         self._network = network
 
     def _check_detectors(self, fewest : int, where : str) -> None:
@@ -701,21 +719,13 @@ class HardExampleGenerator(WaveformGenerator):
         if fewest < needed:
             raise ValueError(
                 f"A {type(self.violation).__name__} hard example of a {type(self.generator).__name__} needs "
-                f"{needed} detectors present in every example, but {where} {fewest} (counted as "
-                f"gf.{type(self.violation).__name__} counts them: detectors that receive one signal alike may count "
-                f"once): there its signal is one a real source gives (the generator's "
+                f"{needed} detectors present in every example, but {where} {fewest} (counted as the rank of their "
+                f"response tensors: detectors of equal, opposite or dependent responses count once): there its signal "
+                f"may be one a real source gives (the generator's "
                 f"polarisations carry {self.generator.independent_waveforms} independent waveforms; see "
-                f"gf.{type(self.violation).__name__}). Give it more detectors, or a num_present of at least {needed}."
+                f"gf.{type(self.violation).__name__}). Give it more independent detectors, or a num_present of at "
+                f"least {needed}."
             )
-
-    def _fewest_present(self, network) -> int:
-        """The fewest detectors an example of ``network`` can present, counted by the violation where its geometry is fixed."""
-        if isinstance(network, gf.Detectors):
-            if network.num_present is None:
-                return network.num_detectors
-            return int(np.ceil(get_support_bounds(network.num_present, "num_present")[0]))
-        present = np.ones((1, _num_detectors(network)))
-        return int(self.violation.distinct_detectors(network.response, network.location, present)[0])
 
     def get_max_generated_duration(self):
         return self.generator.get_max_generated_duration()
@@ -834,9 +844,7 @@ class HardExampleGenerator(WaveformGenerator):
         present = np.asarray(network.present, dtype=np.float64) if isinstance(network, ExampleNetworks) \
             else np.ones((num_examples, num_detectors))
         # A network drawn per example is counted here, its geometry known.
-        self._check_detectors(
-            int(np.min(self.violation.distinct_detectors(network.response, network.location, present))),
-            "an example of this batch has")
+        self._check_detectors(int(np.min(_response_rank(network.response, present))), "an example of this batch has")
 
         def stream(name):
             return streams.stream(f"inject/{label}/violation/{name}")

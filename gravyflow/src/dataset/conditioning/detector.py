@@ -1497,6 +1497,20 @@ class Detectors:
             column[name] = np.broadcast_to(value, (num_examples,) + value.shape)
         return column
 
+    def fixed_response(self) -> Optional[np.ndarray]:
+        """
+        Each detector's response tensor, (Detectors, 3, 3) float64, where no
+        geometry is drawn (bundled detectors, and slots at fixed sites: every
+        example's), or None where a slot's is.
+        """
+        if any(slot.drawn for slot in self.slots):
+            return None
+        return np.stack([
+            self._bundled_column(detector, 1)["response"][0] if isinstance(detector, IFO)
+            else detector_geometry(detector.draw(1, None))["response"][0]
+            for detector in self.detectors
+        ])
+
     def _geocentre_distances_meters(self) -> np.ndarray:
         """Each detector's greatest distance from the geocentre, metres."""
         bundled = iter(np.linalg.norm(np.asarray(self._bundled.location, dtype=np.float64), axis=-1)) \
