@@ -1519,6 +1519,16 @@ class CBCGenerator(WaveformGenerator):
         )
 
 
+def _equal_by_specification(self, other) -> bool:
+    """
+    Equality of a generator built from others (gf.IncoherentGenerator,
+    gf.HardExampleGenerator): by its specification, what fingerprints it. The
+    dataclass equality it would inherit compares the base's fields alone,
+    which leave its parts out.
+    """
+    return type(self) is type(other) and self.specification() == other.specification()
+
+
 class IncoherentGenerator(WaveformGenerator):
     """
     One injection with its own waveform in each detector: component j's
@@ -1534,7 +1544,8 @@ class IncoherentGenerator(WaveformGenerator):
     fingerprint it: its scaling method, injection chance, padding,
     allow_partially_out_of_window and network are component 0's when it is
     built, its sky and reference time the base's defaults; a component's own
-    are not read. HRSS and
+    are not read. It compares, as it fingerprints, by those and its
+    components (``specification``). HRSS and
     HPEAK measure the whole injection: the root-sum-square over the
     detectors, and the loudest detector's peak. Each component draws its
     waveform from its own streams (``comp/{j}``).
@@ -1549,6 +1560,8 @@ class IncoherentGenerator(WaveformGenerator):
     refused by name with it. A labelled mismatch is gf.HardExampleGenerator
     with gf.MismatchedWaveforms.
     """
+    __eq__ = _equal_by_specification
+
     def __init__(self, component_generators, name : Optional[str] = None):
         self.component_generators = component_generators
         self.name = None if name is None else check_name(name, "generator name")

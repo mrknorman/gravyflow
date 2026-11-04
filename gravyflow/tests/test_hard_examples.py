@@ -780,6 +780,25 @@ def test_a_hard_examples_declarations_are_its_generators():
         f"{gf.WrongDelay(0.005).margin_seconds!r}), name='late')"
 
 
+def test_a_generator_built_from_others_is_equal_by_its_specification():
+    """
+    A hard example and an incoherent injection compare as they fingerprint, by their specification: their own settings
+    and their parts, so two of one generator with different violations, or two of different components, differ.
+    """
+    late = gf.HardExampleGenerator(wnb(), gf.WrongDelay(0.01))
+    assert late == gf.HardExampleGenerator(wnb(), gf.WrongDelay(0.01))
+    for other in (gf.HardExampleGenerator(wnb(), gf.MismatchedWaveforms("noise")),
+                  gf.HardExampleGenerator(wnb(), gf.WrongDelay(0.02)),
+                  gf.HardExampleGenerator(wnb(duration_seconds=constant(0.2)), gf.WrongDelay(0.01)),
+                  gf.HardExampleGenerator(wnb(), gf.WrongDelay(0.01), name="late"), wnb()):
+        assert late != other, other
+    incoherent = gf.IncoherentGenerator([wnb(), wnb()])
+    assert incoherent == gf.IncoherentGenerator([wnb(), wnb()])
+    for other in (gf.IncoherentGenerator([wnb(), wnb(duration_seconds=constant(0.2))]),
+                  gf.IncoherentGenerator([wnb(), wnb(), wnb()]), wnb()):
+        assert incoherent != other, other
+
+
 def test_mismatched_waveforms_of_nothing_are_refused_by_name():
     for differ in (None, (), (1,), ("noise", None)):
         with pytest.raises(ValueError, match="at least one named draw"):

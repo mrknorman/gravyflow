@@ -39,7 +39,8 @@ from keras import ops
 import gravyflow as gf
 from gravyflow.src.dataset.conditioning.detector import C, ExampleNetworks
 from gravyflow.src.dataset.features.injection import (
-    SIGNAL_EXTENT, IncoherentGenerator, WaveformGenerator, _common_values, get_support_bounds,
+    SIGNAL_EXTENT, IncoherentGenerator, WaveformGenerator, _common_values, _equal_by_specification,
+    get_support_bounds,
 )
 from gravyflow.src.dataset.tools.snr import _spectrum_for
 from gravyflow.src.rng.consumers import check_name
@@ -701,7 +702,9 @@ class HardExampleGenerator(WaveformGenerator):
     method, injection chance, padding, allow_partially_out_of_window, sky and
     reference time are its own, the generator's when it is built: the injection layer reads them from it,
     and they fingerprint it, so one changed afterwards (as the validator
-    does) changes the hard example, and the generator's are not read. Its
+    does) changes the hard example, and the generator's are not read. It
+    compares, as it fingerprints, by those, its generator and its violation
+    (``specification``). Its
     network is the generator's, or the dataset's. Placement,
     the SNR target over the present detectors, the window and whitening are
     the injection layer's, as for the generator, so a hard example sits in the
@@ -735,6 +738,8 @@ class HardExampleGenerator(WaveformGenerator):
 
     ``ReturnVariables.VIOLATION`` gives each example's ``violation.code``.
     """
+
+    __eq__ = _equal_by_specification
 
     def __init__(self, generator : WaveformGenerator, violation : Violation, name : Optional[str] = None):
         self.generator = generator
