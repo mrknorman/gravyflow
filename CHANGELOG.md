@@ -211,8 +211,10 @@ repository before it may need the changes below.
   (`inject/{g}/violation/{detector,partner,sign,margin}`, `wave/{g}/violation/correlation`, and
   `wave/{g}/comp/{j}/...` for a detector's differing draws), so every existing stream draws as before: a dataset
   without a hard example draws its digests of before (`fixtures/stream_digests`: its drawn labels, its placement in
-  whole samples and the sign of its white noise), and a generator beside a hard example, before or after it, draws
-  what it draws alone.
+  whole samples and the sign of its white noise), and a named generator beside a hard example, before or after it,
+  draws what it draws alone. An unnamed generator's streams are labelled by its position among the dataset's
+  generators (`"{index}:{class}"`), as without hard examples, so it draws what it draws alone only at the position it
+  has alone.
 
 - **Hard examples: measured.** A wrong delay's other pairs: for margins of 2 to 20 ms on networks of two to four
   detectors drawn on the sphere, the shifted copy exceeds the largest margin on another pair in about a quarter of

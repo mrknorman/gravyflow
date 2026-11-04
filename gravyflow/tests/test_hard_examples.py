@@ -1162,6 +1162,21 @@ def test_a_hard_example_leaves_the_draws_beside_it_as_they_were(case, ifos, firs
         assert alone.tobytes() == beside.tobytes(), key
 
 
+def test_an_unnamed_generator_beside_a_hard_example_draws_by_its_position():
+    """
+    An unnamed generator's streams are labelled by its position among the dataset's generators, as without hard
+    examples: it draws what it draws alone where it keeps the position it has alone, and other draws behind a hard
+    example.
+    """
+    def draws(generators, column):
+        labels = dataset(generators)[1][1]
+        return b"".join(np.asarray(labels[key])[:, column].tobytes() for key in ("CENTRAL_TIME", "SNR"))
+
+    alone = draws([wnb()], 0)
+    assert draws([wnb(), STREAM_CASES["wrong delay"]()], 0) == alone
+    assert draws([STREAM_CASES["wrong delay"](), wnb()], 1) != alone
+
+
 @pytest.mark.parametrize("case", STREAM_CASES)
 def test_a_hard_examples_batches_are_a_function_of_their_address(case):
     """
