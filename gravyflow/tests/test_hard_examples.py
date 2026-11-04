@@ -121,7 +121,7 @@ def test_a_hard_example_draws_as_its_generator_under_its_own_name():
     np.testing.assert_array_equal(np.stack([before, after]), expected)
 
 
-def test_a_time_reversed_chirp_rises_from_its_merger():
+def test_a_time_reversed_chirp_falls_from_its_merger():
     """A CBC's frequency rises into its merger; reversed, it falls from it, with the merger at the same sample."""
     cbc = dict(mass_1_msun=constant(30.0), mass_2_msun=constant(30.0),
                scaling_method=gf.ScalingMethod(constant(TARGET_SNR), gf.ScalingTypes.SNR))
@@ -624,11 +624,16 @@ SHAPES = {
 
 
 def _outside_span(waveforms, basis):
-    """The largest share of a polarisation of ``waveforms`` (2, Time) outside the span of ``basis``'s and their quadratures."""
+    """
+    The largest share of a polarisation of ``waveforms`` (2, Time) outside the span of ``basis``'s and their
+    quadratures, of the polarisations that hold anything (a linearly polarised waveform's cross is empty).
+    """
     from scipy.signal import hilbert
     vectors = np.concatenate([basis, np.imag(hilbert(basis, axis=-1))]).T
     shares = []
     for polarisation in waveforms:
+        if not np.any(polarisation):
+            continue
         fit, *_ = np.linalg.lstsq(vectors, polarisation, rcond=None)
         shares.append(np.linalg.norm(polarisation - vectors @ fit) / np.linalg.norm(polarisation))
     return max(shares)
