@@ -457,6 +457,20 @@ class WaveformGenerator:
     # reversed.
     time_reversal_leaves_family : ClassVar[bool] = False
 
+    @property
+    def independent_waveforms(self) -> int:
+        """
+        How many independent waveforms its polarisations carry: 1 where the
+        cross polarisation is the plus a quarter cycle on, rescaled, or none;
+        2 where they are drawn apart. Each detector receives a combination of
+        the polarisations, delayed, so a network of that many detectors or
+        fewer receives any waveforms in them, and only a larger one can show
+        a signal no source of this generator gives (gf.HardExampleGenerator).
+        Declared by each generator: two, the most a signal carries, where it
+        declares none.
+        """
+        return 2
+
     def __post_init__(self):
         if self.name is not None:
             check_name(self.name, "generator name")
@@ -978,6 +992,12 @@ class WNBGenerator(WaveformGenerator):
     extent_attributes : ClassVar[Tuple[str, ...]] = (
         "duration_seconds", "min_frequency_hertz", "max_frequency_hertz")
 
+    @property
+    def independent_waveforms(self) -> int:
+        """Two independent noises, unless its eccentricity is 1 alone: the plus polarisation only."""
+        low, _ = get_support_bounds(self.polarization_eccentricity, "polarization_eccentricity")
+        return 1 if low == 1.0 else 2
+
     distributed_attributes : Tuple[str] = (
         "duration_seconds",
         "min_frequency_hertz",
@@ -1152,6 +1172,11 @@ class CBCGenerator(WaveformGenerator):
 
     # A binary's frequency rises into its merger; reversed, it falls from it.
     time_reversal_leaves_family : ClassVar[bool] = True
+
+    # Its dominant mode's cross polarisation is its plus a quarter cycle on,
+    # rescaled by the inclination (this holds it so for every approximant, as
+    # its shape_attributes do).
+    independent_waveforms : ClassVar[int] = 1
 
     distributed_attributes : Tuple[str] = (
         "mass_1_msun",

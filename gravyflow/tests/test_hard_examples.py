@@ -4,6 +4,7 @@ the examples are the generator's in everything else.
 """
 
 import dataclasses
+import itertools
 
 import numpy as np
 import pytest
@@ -55,10 +56,10 @@ def dataset(generators, ifos=(gf.IFO.H1, gf.IFO.L1, gf.IFO.V1), seed=3, outputs=
     )
 
 
-#: Per-example networks: two bundled detectors and two drawn slots, two to four of them present.
+#: Per-example networks: two bundled detectors and two drawn slots, at least three of them present.
 DETECTORS = gf.Detectors(
     [gf.IFO.H1, gf.IFO.L1, gf.DetectorSlot("D0", gf.IFO.H1), gf.DetectorSlot("D1", gf.IFO.L1)],
-    num_present=uniform(2, 4, int))
+    num_present=uniform(3, 4, int))
 
 #: Representation: float32 rounding of the SNR's sum of N squares, twice (scale, measure).
 SNR_TOLERANCE = representation_tolerance(np.float32, 1.0, 2 * np.sqrt(SAMPLE_RATE))
@@ -383,7 +384,7 @@ def test_a_generators_extent_attributes_are_the_draws_that_move_its_extent(gener
     drawn again with them), which the mismatch refuses by name as it draws; every other shape draw leaves every
     detector's extent one, the one it records.
     """
-    network = gf.Network([gf.IFO.H1, gf.IFO.L1])
+    network = gf.Network([gf.IFO.H1, gf.IFO.L1, gf.IFO.V1])
     streams = gf.SeedTree(2).batch("train", 0, 0).sub("wave/odd")
     made = generator(**EXTENTS[generator])
     assert set(generator.extent_attributes) <= set(generator.shape_attributes)
@@ -437,7 +438,7 @@ def test_a_mismatch_is_scaled_to_a_network_snr():
 
 
 def test_mismatched_waveforms_correlate_as_asked():
-    network = gf.Network([gf.IFO.H1, gf.IFO.L1])
+    network = gf.Network([gf.IFO.H1, gf.IFO.L1, gf.IFO.V1])
     streams = gf.SeedTree(2).batch("train", 0, 0).sub("wave/odd")
 
     def generated(correlation):
@@ -512,7 +513,7 @@ def test_a_mismatch_correlates_only_its_content():
     for differ in (("duration_seconds",), ("noise", "duration_seconds"), ("mass_1_msun",)):
         with pytest.raises(ValueError, match="correlation mixes in the shared waveform"):
             gf.MismatchedWaveforms(differ, correlation=0.5)
-    network = gf.Network([gf.IFO.H1, gf.IFO.L1])
+    network = gf.Network([gf.IFO.H1, gf.IFO.L1, gf.IFO.V1])
     hard = gf.HardExampleGenerator(wnb(network=network, duration_seconds=uniform(0.05, 0.4)),
                                    gf.MismatchedWaveforms("noise", correlation=0.5), name="mixed")
     waveforms, parameters = hard.generate(64, SAMPLE_RATE, 2.0, gf.SeedTree(2).batch("train", 0, 0).sub("wave/mixed"))
@@ -680,11 +681,11 @@ def test_hard_examples_refuse_what_they_cannot_be():
     with pytest.raises(TypeError, match="violation is a gf.Violation"):
         gf.HardExampleGenerator(wnb(), "late")
     for violation in (gf.WrongDelay(0.01), gf.OneDetector(), gf.MismatchedWaveforms("noise")):
-        with pytest.raises(ValueError, match="needs two detectors present"):
-            gf.HardExampleGenerator(wnb(network=gf.Network([gf.IFO.H1])), violation)
-        with pytest.raises(ValueError, match="needs two detectors present"):
+        with pytest.raises(ValueError, match="needs 3 detectors present"):
+            gf.HardExampleGenerator(wnb(network=gf.Network([gf.IFO.H1, gf.IFO.L1])), violation)
+        with pytest.raises(ValueError, match="needs 3 detectors present"):
             dataset([gf.HardExampleGenerator(wnb(), violation)],
-                    ifos=gf.Detectors([gf.IFO.H1, gf.IFO.L1], num_present=uniform(1, 2, int)))
+                    ifos=gf.Detectors([gf.IFO.H1, gf.IFO.L1, gf.IFO.V1], num_present=uniform(2, 3, int)))
     # Reversal needs no second detector.
     gf.HardExampleGenerator(ringdown(network=gf.Network([gf.IFO.H1])), gf.TimeReversed())
 
@@ -839,3 +840,114 @@ def test_a_violation_acts_through_its_own_hooks():
     first[np.arange(BATCH), np.argmax(present, axis=1)] = 1.0
     np.testing.assert_array_equal(np.asarray(y["VIOLATION_DETECTORS"])[:, 0], first)
     np.testing.assert_array_equal(np.asarray(y["DETECTOR_SNR"])[:, 0] > 0, first > 0)
+
+
+#: A sky held fixed, so each example's own geometry is known: every detector's delay and antenna pattern.
+SKY = dict(right_ascension_radians=1.0, declination_radians=0.3, polarization_radians=0.4)
+NETWORK = (gf.IFO.H1, gf.IFO.L1, gf.IFO.V1)
+SNR_SCALED = dict(scaling_method=gf.ScalingMethod(constant(TARGET_SNR), gf.ScalingTypes.SNR))
+
+#: Each generator, the independent waveforms its polarisations carry, and the draws a mismatch of it differs in
+#: (None: it takes no mismatch).
+COHERENCE = {
+    "binary": (lambda **kwargs: gf.CBCGenerator(
+        mass_1_msun=uniform(30.0, 40.0), mass_2_msun=uniform(30.0, 40.0), min_frequency_hertz=40.0,
+        inclination_radians=1.0, **SNR_SCALED, **kwargs), 1, ("mass_1_msun",)),
+    "white-noise burst": (wnb, 2, ("noise",)),
+    "linear white-noise burst": (lambda **kwargs: wnb(polarization_eccentricity=constant(1.0), **kwargs), 1, ("noise",)),
+    "sine-Gaussian": (lambda **kwargs: gf.SineGaussianGenerator(
+        frequency_hertz=100.0, quality_factor=5.0, polarization_eccentricity=0.5, **SNR_SCALED, **kwargs), 1, None),
+    "chirplet": (lambda **kwargs: gf.ChirpletGenerator(
+        start_frequency_hertz=uniform(50.0, 80.0), end_frequency_hertz=150.0, duration_seconds=0.2,
+        polarization_eccentricity=0.5, **SNR_SCALED, **kwargs), 1, ("start_frequency_hertz",)),
+    "ringdown": (lambda **kwargs: ringdown(frequency_hertz=uniform(100.0, 200.0), polarization_eccentricity=0.5,
+                                           **kwargs), 1, ("frequency_hertz",)),
+    "periodic wave": (lambda **kwargs: gf.PeriodicWaveGenerator(
+        frequency_hertz=uniform(80.0, 120.0), duration_seconds=0.2, **SNR_SCALED, **kwargs), 1, ("frequency_hertz",)),
+}
+
+
+def _fibonacci_sky(num_points):
+    """Right ascensions and declinations spread evenly over the sphere."""
+    index = np.arange(num_points) + 0.5
+    return np.mod(np.pi * (1.0 + np.sqrt(5.0)) * index, 2.0 * np.pi), np.arcsin(1.0 - 2.0 * index / num_points)
+
+
+def _unfit_share(strains, delays, independent, antenna=None):
+    """
+    The share of the detectors' signal power (strains, (Detectors, Time)) that no source whose polarisations carry
+    ``independent`` waveforms gives them, for each set of arrival delays (delays, (Skies, Detectors)): each detector's
+    spectrum aligned by its delay, its best fit by that many free waveforms, each with a complex gain per detector
+    (any polarisation angle and state), within the span of the detectors' antenna patterns (antenna, (Detectors, 2):
+    F+ and Fx at one polarisation angle) where given, any gains where not.
+    """
+    num_samples = strains.shape[-1]
+    spectra = np.fft.rfft(np.asarray(strains, np.float64), n=2 * num_samples, axis=-1)
+    frequencies = np.fft.rfftfreq(2 * num_samples, 1.0 / SAMPLE_RATE)
+    aligned = spectra[None] * np.exp(2j * np.pi * frequencies * np.asarray(delays, np.float64)[..., None])
+    total = np.sum(np.abs(spectra) ** 2)
+    if antenna is not None:
+        basis, _ = np.linalg.qr(np.asarray(antenna, np.float64))
+        aligned = np.einsum("ij,gjf->gif", basis @ basis.T, aligned)
+    power = np.linalg.eigvalsh(aligned @ np.conj(np.swapaxes(aligned, -1, -2)))[..., ::-1]
+    return np.clip(1.0 - np.sum(power[..., :independent], axis=-1) / total, 0.0, 1.0)
+
+
+@pytest.mark.parametrize("name", COHERENCE)
+def test_a_coherence_violation_needs_more_detectors_than_its_generators_waveforms(name):
+    """
+    Every detector receives a combination of the polarisations, delayed, so a network of no more detectors than the
+    independent waveforms the polarisations carry (one for a binary's dominant mode or a burst whose cross
+    polarisation is its plus a quarter cycle on, or none; two for a white-noise burst's independent pair) receives
+    any waveforms in them: there a wrong delay, a mismatch or one silent detector is a real signal. And a source that
+    can be linearly polarised silences one detector at any sky by its polarisation angle, so one detector of two
+    holding a signal is a real signal of every generator. Each is refused there by name; on the smallest network
+    taken, no sky and no polarisation gives it.
+
+    Measured by a least-squares fit of the detectors' noise-free injections by free waveforms: on the refused
+    networks (the taken network's examples, fewer detectors kept), at the example's own sky, it leaves nothing; on
+    the taken network it leaves a share of the power that no sky (a wrong delay, a mismatch) or no polarisation at
+    the example's sky (one silent detector) removes, where the generator's real signal leaves none at its sky.
+    """
+    make, independent, differ = COHERENCE[name]
+    generator = make(**SKY)
+    assert generator.independent_waveforms == independent
+    violations = [gf.WrongDelay(uniform(0.01, 0.02)), gf.OneDetector()] + \
+        ([] if differ is None else [gf.MismatchedWaveforms(differ)])
+    for violation in violations:
+        needed = violation.fewest_detectors(generator)
+        assert needed == (3 if isinstance(violation, gf.OneDetector) else independent + 1)
+        with pytest.raises(ValueError, match=f"needs {needed} detectors present"):
+            dataset([gf.HardExampleGenerator(make(**SKY), violation)], ifos=NETWORK[:needed - 1])
+        ifos = NETWORK[:needed]
+        network = gf.Network(list(ifos))
+        delays = np.asarray(network.get_time_delay(
+            np.float32([SKY["right_ascension_radians"]]), np.float32([SKY["declination_radians"]])), np.float64)
+        antenna = np.asarray(network.get_antenna_pattern(
+            np.float32([SKY["right_ascension_radians"]]), np.float32([SKY["declination_radians"]]),
+            np.float32([SKY["polarization_radians"]])), np.float64)[0]
+        skies = np.asarray(network.get_time_delay(*(np.float32(angle) for angle in _fibonacci_sky(4000))), np.float64)
+        real = np.asarray(dataset([make(**SKY, name="w")], ifos=ifos)[0][1]["INJECTIONS"], np.float64)[:, 0]
+        hard = np.asarray(dataset([gf.HardExampleGenerator(make(**SKY), violation, name="w")], ifos=ifos)[0][1][
+            "INJECTIONS"], np.float64)[:, 0]
+        kept = [list(rows) for rows in itertools.combinations(range(needed), needed - 1)]
+        # One silent detector's data holds one waveform, so one free waveform fits it as two do: the two free
+        # polarisations, which fit any real signal exactly, measure it.
+        fitted = 2 if isinstance(violation, gf.OneDetector) else independent
+        refused, taken, coherent = [], [], []
+        for b in range(BATCH):
+            coherent.append(_unfit_share(real[b], delays, fitted, antenna)[0])
+            # Each refused network that receives the signal: one silent detector's alone receives none.
+            refused.extend(_unfit_share(hard[b][rows], delays[:, rows], fitted, antenna[rows])[0]
+                           for rows in kept if np.any(hard[b][rows] != 0.0))
+            taken.append(_unfit_share(hard[b], delays, fitted, antenna)[0]
+                         if isinstance(violation, gf.OneDetector) else
+                         np.min(_unfit_share(hard[b], skies, independent)))
+        print(f"{name}, {type(violation).__name__} on {needed} detectors: real {max(coherent):.2e}, "
+              f"refused {max(refused):.2e}, taken {min(taken):.2e} to {max(taken):.2e}")
+        # A real signal is fit to within the model's quarter cycle: a binary's cross polarisation is its plus a
+        # quarter cycle on to within its taper (3e-3 of its power), a ringdown's to within its sudden start (1e-2).
+        assert max(coherent) < 2e-2 and max(refused) < 1e-9, (name, violation, coherent, refused)
+        # A drawn margin or mismatch leaves as much as it differs: a chirplet's start frequencies drawn near each
+        # other leave 2e-4.
+        assert min(taken) > 10.0 * max(coherent) and min(taken) > 1e-4, (name, violation, taken, coherent)

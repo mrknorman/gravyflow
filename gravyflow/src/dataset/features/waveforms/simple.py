@@ -159,6 +159,9 @@ class PeriodicWaveGenerator(gf.WaveformGenerator):
     shape_attributes: ClassVar[Tuple[str, ...]] = ("frequency_hertz", "duration_seconds")
     extent_attributes: ClassVar[Tuple[str, ...]] = ("duration_seconds",)
 
+    # Linearly polarised: the plus polarisation only.
+    independent_waveforms: ClassVar[int] = 1
+
     distributed_attributes: Tuple[str] = (
         "frequency_hertz",
         "amplitude",
@@ -274,6 +277,10 @@ class SineGaussianGenerator(gf.WaveformGenerator):
 
     # Its envelope's length, tau = Q / (sqrt(2) pi f), is both's.
     extent_attributes: ClassVar[Tuple[str, ...]] = ("frequency_hertz", "quality_factor")
+
+    # Its cross polarisation is its plus a quarter cycle on (envelope x sin
+    # beside envelope x cos), rescaled by the eccentricity.
+    independent_waveforms: ClassVar[int] = 1
 
     distributed_attributes: Tuple[str] = (
         "frequency_hertz",
@@ -397,6 +404,10 @@ class ChirpletGenerator(gf.WaveformGenerator):
         "start_frequency_hertz", "end_frequency_hertz", "duration_seconds")
     extent_attributes: ClassVar[Tuple[str, ...]] = ("duration_seconds",)
 
+    # Its cross polarisation is its plus a quarter cycle on (envelope x sin
+    # beside envelope x cos), rescaled by the eccentricity.
+    independent_waveforms: ClassVar[int] = 1
+
     distributed_attributes: Tuple[str] = (
         "start_frequency_hertz",
         "end_frequency_hertz",
@@ -512,6 +523,10 @@ class RingdownGenerator(gf.WaveformGenerator):
     # and the phase each detector receives one ringdown with.
     shape_attributes: ClassVar[Tuple[str, ...]] = ("frequency_hertz", "damping_time_seconds")
     extent_attributes: ClassVar[Tuple[str, ...]] = ("damping_time_seconds",)
+
+    # Its cross polarisation is its plus a quarter cycle on (envelope x sin
+    # beside envelope x cos), rescaled by the eccentricity.
+    independent_waveforms: ClassVar[int] = 1
 
     # A ringdown starts at its peak and decays (its damping time is
     # positive); reversed, it rises into its peak and stops there.

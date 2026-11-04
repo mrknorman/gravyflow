@@ -99,12 +99,20 @@ class Violation:
     """
     code : ClassVar[ViolationCode]
 
-    #: Whether it moves signal between detectors, so that every example needs
-    #: two present.
-    needs_two_detectors : ClassVar[bool] = True
-
     def check(self, generator : WaveformGenerator) -> None:
         """Refuse by name a generator whose signals it cannot violate, when the hard example is built."""
+
+    def fewest_detectors(self, generator : WaveformGenerator) -> int:
+        """
+        The fewest detectors an example needs present for its signal to be
+        one no source of ``generator`` gives, a network that can present
+        fewer refused by name: by default, one more than the waveforms its
+        polarisations carry (``independent_waveforms``), since that many
+        detectors receive any waveforms in them, so a violation of the
+        detectors' coherence (a wrong delay, a mismatch) is a real signal
+        there.
+        """
+        return generator.independent_waveforms + 1
 
     def check_scaling(self, scaling_method) -> None:
         """Refuse by name a scaling it cannot be given, when the hard example is built and as it is scaled."""
@@ -281,8 +289,20 @@ class OneDetector(Violation):
     below the target (the SNR label gives it, measured). A detector louder
     than any real signal's would put it there would be a cue in one detector
     alone; the missing detectors' share is the violation itself.
+
+    A source that can be linearly polarised (a binary seen edge-on, a burst
+    of eccentricity 1, a white-noise burst whose polarisations fall in
+    proportion) leaves a detector silent at any sky, at the polarisation
+    angle where that detector's response vanishes, so one detector of two
+    holding the signal is a real signal: it needs three present
+    (``fewest_detectors``). Silencing two at once takes a sky where their
+    responses are parallel, which no example's own sky is but by chance.
     """
     code : ClassVar[ViolationCode] = ViolationCode.ONE_DETECTOR
+
+    def fewest_detectors(self, generator):
+        """Three, and more where the generator's waveforms ask it: one silent detector of two is a real signal."""
+        return max(super().fewest_detectors(generator), 3)
 
     def projection(self, hard_example, network, time_delays, present, stream, num_examples,
                    offsets_seconds, extent_seconds, window_seconds):
@@ -516,7 +536,9 @@ class TimeReversed(Violation):
     """
     code : ClassVar[ViolationCode] = ViolationCode.TIME_REVERSED
 
-    needs_two_detectors : ClassVar[bool] = False
+    def fewest_detectors(self, generator):
+        """One: the reversed waveform is no real signal of its generator in any detector."""
+        return 1
 
     def check(self, generator):
         if not generator.time_reversal_leaves_family:
@@ -616,11 +638,13 @@ class HardExampleGenerator(WaveformGenerator):
     its generator's signals arrive by the copy's direction, gf.WrongDelay).
 
     The violation acts through its own hooks (``Violation``), which this calls
-    in every case. One that moves signal between detectors (all but
-    TimeReversed, ``needs_two_detectors``) needs two detectors present in
-    every example: a network or a num_present that can give fewer is refused
-    by name. TimeReversed takes only a generator whose reversal leaves its
-    family (gf.TimeReversed).
+    in every case. Every example needs the detectors present that the
+    violation asks of the generator (``Violation.fewest_detectors``: one
+    more than the independent waveforms the generator's polarisations carry
+    for a wrong delay or a mismatch, three for one detector, one for a
+    reversal): a network or a num_present that can give fewer is refused by
+    name when the dataset is built. TimeReversed takes only a generator
+    whose reversal leaves its family (gf.TimeReversed).
 
     ``ReturnVariables.VIOLATION`` gives each example's ``violation.code``.
     """
@@ -667,13 +691,16 @@ class HardExampleGenerator(WaveformGenerator):
     def network(self, network):
         # Checked on every assignment, a dataset's binding included.
         network = self.init_network(network, self.geometry_stream())
-        if network is not None and self.violation.needs_two_detectors:
-            fewest = self._fewest_present(network)
-            if fewest < 2:
+        if network is not None:
+            fewest, needed = self._fewest_present(network), self.violation.fewest_detectors(self.generator)
+            if fewest < needed:
                 raise ValueError(
-                    f"A {type(self.violation).__name__} hard example needs two detectors present in every "
-                    f"example, but its network can have {fewest}: give it more detectors, or a num_present "
-                    "of at least 2."
+                    f"A {type(self.violation).__name__} hard example of a {type(self.generator).__name__} needs "
+                    f"{needed} detectors present in every example, but its network can have {fewest}: there its "
+                    f"signal is one a real source gives (the generator's polarisations carry "
+                    f"{self.generator.independent_waveforms} independent waveforms; see "
+                    f"gf.{type(self.violation).__name__}). Give it more detectors, or a num_present of at least "
+                    f"{needed}."
                 )
         self._network = network
 
@@ -803,10 +830,6 @@ class HardExampleGenerator(WaveformGenerator):
         num_detectors = int(ops.shape(time_delays)[-1])
         present = np.asarray(network.present, dtype=np.float64) if isinstance(network, ExampleNetworks) \
             else np.ones((num_examples, num_detectors))
-        if self.violation.needs_two_detectors and np.any(np.sum(present > 0, axis=1) < 2):
-            raise ValueError(
-                f"A {type(self.violation).__name__} hard example needs two detectors present, but an example has one."
-            )
 
         def stream(name):
             return streams.stream(f"inject/{label}/violation/{name}")
