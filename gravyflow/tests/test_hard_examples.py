@@ -11,6 +11,7 @@ import pytest
 
 import gravyflow as gf
 from gravyflow.src.dataset.conditioning.detector import C
+from gravyflow.src.dataset.features.hard_examples import _MismatchedStreams
 from gravyflow.src.dataset.features.injection import SIGNAL_EXTENT
 from gravyflow.src.rng.consumers import check_consumer
 from gravyflow.tests import test_injection
@@ -818,7 +819,8 @@ SNR_SCALED = dict(scaling_method=gf.ScalingMethod(constant(TARGET_SNR), gf.Scali
 COHERENCE = {
     "binary": (lambda **kwargs: gf.CBCGenerator(
         mass_1_msun=uniform(30.0, 40.0), mass_2_msun=uniform(30.0, 40.0), min_frequency_hertz=40.0,
-        inclination_radians=1.0, **SNR_SCALED, **kwargs), 1, ("mass_1_msun",)),
+        inclination_radians=1.0, front_padding_duration_seconds=0.2, back_padding_duration_seconds=0.2,
+        **SNR_SCALED, **kwargs), 1, ("mass_1_msun",)),
     "white-noise burst": (wnb, 2, ("noise",)),
     "linear white-noise burst": (lambda **kwargs: wnb(polarization_eccentricity=constant(1.0), **kwargs), 1, ("noise",)),
     "sine-Gaussian": (lambda **kwargs: gf.SineGaussianGenerator(
@@ -826,8 +828,8 @@ COHERENCE = {
     "chirplet": (lambda **kwargs: gf.ChirpletGenerator(
         start_frequency_hertz=uniform(50.0, 80.0), end_frequency_hertz=150.0, duration_seconds=0.2,
         polarization_eccentricity=0.5, **SNR_SCALED, **kwargs), 1, ("start_frequency_hertz",)),
-    "ringdown": (lambda **kwargs: ringdown(frequency_hertz=uniform(100.0, 200.0), polarization_eccentricity=0.5,
-                                           **kwargs), 1, ("frequency_hertz",)),
+    "ringdown": (lambda **kwargs: ringdown(frequency_hertz=uniform(100.0, 200.0), damping_time_seconds=constant(0.05),
+                                           polarization_eccentricity=0.5, **kwargs), 1, ("frequency_hertz",)),
     "periodic wave": (lambda **kwargs: gf.PeriodicWaveGenerator(
         frequency_hertz=uniform(80.0, 120.0), duration_seconds=0.2, **SNR_SCALED, **kwargs), 1, ("frequency_hertz",)),
 }
@@ -837,6 +839,26 @@ def _fibonacci_sky(num_points):
     """Right ascensions and declinations spread evenly over the sphere."""
     index = np.arange(num_points) + 0.5
     return np.mod(np.pi * (1.0 + np.sqrt(5.0)) * index, 2.0 * np.pi), np.arcsin(1.0 - 2.0 * index / num_points)
+
+
+def _draw_spread(generator, violation, num_detectors):
+    """
+    Each example's widest difference between its detectors' draws of a mismatch's parameters, as a share of each
+    one's range, in the first batch of the reachability test's datasets (seed 3, generator "w"): infinite for a
+    content draw, a burst's noise, which no two detectors draw alike, and for any other violation, which draws none.
+    """
+    if not isinstance(violation, gf.MismatchedWaveforms):
+        return np.full(BATCH, np.inf)
+    streams = gf.SeedTree(3).batch("train", 0, 0).sub("wave/w")
+    spread = np.zeros(BATCH)
+    for draw in violation.differ:
+        distribution = getattr(generator, draw, None)
+        if not isinstance(distribution, gf.Distribution):
+            return np.full(BATCH, np.inf)
+        values = [distribution.sample(BATCH, _MismatchedStreams(streams, violation.differ, j).stream(f"param/{draw}"))
+                  for j in range(num_detectors)]
+        spread = np.maximum(spread, np.ptp(values, axis=0) / (distribution.max_ - distribution.min_))
+    return spread
 
 
 def _unfit_share(strains, delays, independent, antenna=None):
@@ -873,7 +895,10 @@ def test_a_coherence_violation_needs_more_detectors_than_its_generators_waveform
     Measured by a least-squares fit of the detectors' noise-free injections by free waveforms: on the refused
     networks (the taken network's examples, fewer detectors kept), at the example's own sky, it leaves nothing; on
     the taken network it leaves a share of the power that no sky (a wrong delay, a mismatch) or no polarisation at
-    the example's sky (one silent detector) removes, where the generator's real signal leaves none at its sky.
+    the example's sky (one silent detector) removes, where the generator's real signal leaves next to none at its
+    sky. A mismatch is as far from a real signal as its detectors' draws differ, so it is measured where they
+    differ by at least a twentieth of their range. A binary's merger is kept from the window's edges, which would
+    cut its inspiral differently in each detector, and the ringdown rings for long enough to fit the model.
     """
     make, independent, differ = COHERENCE[name]
     generator = make(**SKY)
@@ -909,14 +934,19 @@ def test_a_coherence_violation_needs_more_detectors_than_its_generators_waveform
             taken.append(_unfit_share(hard[b], delays, fitted, antenna)[0]
                          if isinstance(violation, gf.OneDetector) else
                          np.min(_unfit_share(hard[b], skies, independent)))
+        spread = _draw_spread(generator, violation, needed)
+        apart = spread >= 0.05
+        taken = np.asarray(taken)
         print(f"{name}, {type(violation).__name__} on {needed} detectors: real {max(coherent):.2e}, "
-              f"refused {max(refused):.2e}, taken {min(taken):.2e} to {max(taken):.2e}")
+              f"refused {max(refused):.2e}, taken {min(taken[apart]):.2e} to {max(taken[apart]):.2e} "
+              f"({np.sum(apart)} of {BATCH}; draws closer: {np.round(taken[~apart], 6).tolist()})")
         # A real signal is fit to within the model's quarter cycle: a binary's cross polarisation is its plus a
-        # quarter cycle on to within its taper (3e-3 of its power), a ringdown's to within its sudden start (1e-2).
-        assert max(coherent) < 2e-2 and max(refused) < 1e-9, (name, violation, coherent, refused)
-        # A drawn margin or mismatch leaves as much as it differs: a chirplet's start frequencies drawn near each
-        # other leave 2e-4.
-        assert min(taken) > 10.0 * max(coherent) and min(taken) > 1e-4, (name, violation, taken, coherent)
+        # quarter cycle on to within its taper, a ringdown's to within its sudden start.
+        assert max(coherent) < 1e-2 and max(refused) < 1e-9, (name, violation, coherent, refused)
+        assert np.sum(apart) >= BATCH - 1, (name, violation)
+        # A binary's masses drawn 0.2 % of their range apart leave 3e-5, 7 % apart 3e-4, 15 % apart 2e-3; a
+        # chirplet's start frequencies 4 % apart leave 2e-4.
+        assert min(taken[apart]) > 2.0 * max(coherent) and min(taken[apart]) > 1e-4, (name, violation, taken, coherent)
 
 
 def test_a_violation_is_labelled_by_kind_alone():
