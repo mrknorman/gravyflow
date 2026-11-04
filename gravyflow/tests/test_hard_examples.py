@@ -736,6 +736,37 @@ def test_time_reversal_is_refused_where_it_stays_in_its_generators_family():
     assert not gf.WaveformGenerator.time_reversal_leaves_family
 
 
+def test_the_violation_base_and_a_violation_without_a_code_are_refused():
+    """gf.Violation is the base of the violations, not one: it, and a subclass that names no code, label nothing."""
+    with pytest.raises(TypeError, match="Violation names no code .*the base of the violations"):
+        gf.Violation()
+
+    @dataclasses.dataclass(frozen=True)
+    class Uncoded(gf.Violation):
+        pass
+
+    with pytest.raises(TypeError, match="Uncoded names no code"):
+        Uncoded()
+    with pytest.raises(TypeError, match="violation is a gf.Violation"):
+        gf.HardExampleGenerator(wnb(), gf.Violation)
+    # A subclass of a violation keeps its code, and pickles as it.
+    late = pickle.loads(pickle.dumps(gf.WrongDelay(0.01)))
+    assert late == gf.WrongDelay(0.01) and late.code is gf.ViolationCode.WRONG_DELAY
+
+
+def test_a_hard_examples_declarations_are_its_generators():
+    """What a hard example declares of its polarisations and draws, and its repr, are its generator's, not the base's."""
+    aligned = binary()
+    hard = gf.HardExampleGenerator(aligned, gf.WrongDelay(0.005), name="late")
+    assert hard.independent_waveforms == aligned.independent_waveforms == 1
+    assert hard.shape_attributes == aligned.shape_attributes and hard.extent_attributes == aligned.extent_attributes
+    burst = gf.HardExampleGenerator(wnb(), gf.MismatchedWaveforms("noise"))
+    assert burst.shape_attributes == gf.WNBGenerator.shape_attributes
+    assert burst.extent_attributes == gf.WNBGenerator.extent_attributes
+    assert repr(hard) == f"HardExampleGenerator(generator={aligned!r}, violation=WrongDelay(margin_seconds=" \
+        f"{gf.WrongDelay(0.005).margin_seconds!r}), name='late')"
+
+
 def test_mismatched_waveforms_of_nothing_are_refused_by_name():
     for differ in (None, (), (1,), ("noise", None)):
         with pytest.raises(ValueError, match="at least one named draw"):
@@ -1040,14 +1071,6 @@ def test_what_cannot_label_or_hold_a_violation_is_refused_outside_a_dataset():
     np.testing.assert_array_equal(np.asarray(labels[RV.VIOLATION]), float(gf.ViolationCode.WRONG_DELAY))
 
 
-def test_a_violation_is_labelled_by_kind_alone():
-    """
-    VIOLATION labels what an example is; which detector's copy of a two-detector wrong delay was moved is no label,
-    since the data cannot say (one copy shifted from the other is the other shifted back), so none is given.
-    """
-    assert not hasattr(gf.ReturnVariables, "VIOLATION_DETECTORS")
-
-
 def test_a_mismatch_differs_in_content_only_where_its_generator_draws_one():
     """'noise', a burst's random content, is a draw only of a generator that names it among its shape draws."""
     binary = gf.CBCGenerator(mass_1_msun=uniform(20.0, 40.0), **SNR_SCALED)
@@ -1116,23 +1139,25 @@ def _digest(batch):
     return h.hexdigest()
 
 
+@pytest.mark.parametrize("first", [True, False], ids=["real first", "hard first"])
 @pytest.mark.parametrize("ifos", [NETWORK, DETECTORS], ids=["fixed network", "per-example network"])
 @pytest.mark.parametrize("case", STREAM_CASES)
-def test_a_hard_example_leaves_the_draws_beside_it_as_they_were(case, ifos):
+def test_a_hard_example_leaves_the_draws_beside_it_as_they_were(case, ifos, first):
     """
-    A hard example draws from streams of its own name, so the generator beside it, the noise and the network draw what
-    they draw without it, to the byte.
+    A hard example draws from streams of its own name, so the named generator beside it, before it or after it, the
+    noise and the network draw what they draw without it, to the byte.
     """
     outputs = (RV.OFFSOURCE,)
     x_alone, y_alone = dataset([wnb(name="real")], ifos=ifos, outputs=outputs)[1]
-    x_beside, y_beside = dataset([wnb(name="real"), STREAM_CASES[case]()], ifos=ifos, outputs=outputs)[1]
+    generators = [wnb(name="real"), STREAM_CASES[case]()]
+    x_beside, y_beside = dataset(generators if first else generators[::-1], ifos=ifos, outputs=outputs)[1]
     np.testing.assert_array_equal(np.asarray(x_beside["DETECTOR_MASK"]), np.asarray(x_alone["DETECTOR_MASK"]))
     for key, alone in y_alone.items():
         alone, beside = np.asarray(alone), np.asarray(y_beside[key])
         if key != "OFFSOURCE":
             # The generator's own: its column of the generator axis.
             assert beside.shape[1] == 2 and alone.shape[1] == 1, key
-            beside = beside[:, :1]
+            beside = beside[:, :1] if first else beside[:, 1:]
         assert alone.tobytes() == beside.tobytes(), key
 
 

@@ -6,12 +6,18 @@ later version against, so a change that adds a generator or a stream moves
 none of theirs.
 
 A digest covers a batch's drawn labels (the sky, the polarisation, the
-scaling target, the generator's parameters and the detectors present): the
-values the seed tree's streams give, which NumPy draws to the same bits on
-every platform. The strain the draws make passes through floating-point
-kernels whose bits may differ between platforms and library versions, so it
-is not pinned; ``--full`` prints every case's whole-batch digest instead, to
-compare two versions of the library on one host.
+scaling target, the generator's parameters and the detectors present), its
+placement and, for white noise, its noise: the values the seed tree's
+streams give, which NumPy draws to the same bits on every platform. The
+placement is each example's offset from the window's centre in whole
+samples, from CENTRAL_TIME less each detector's delay at the drawn sky
+(rounded, so the float32 arithmetic between them cannot move it); the noise
+is the sign of each offsource sample, which no platform's rounding of a
+Gaussian draw flips. The strain the draws make, and coloured noise, pass
+through floating-point kernels whose bits may differ between platforms and
+library versions, so they are not pinned; ``--full`` prints every case's
+whole-batch digest instead, to compare two versions of the library on one
+host.
 
 Run from the repository root, against the version to pin:
 
@@ -93,15 +99,33 @@ def digest(arrays):
     return h.hexdigest()
 
 
+def placement(y, ifos, sample_rate_hertz=512.0, window_seconds=1.0):
+    """
+    Each example's reference-time offset from the window's centre, in whole samples, (Batch, Generators): CENTRAL_TIME
+    (a fraction of the window) less each present detector's delay at the generator's drawn sky, averaged over them.
+    """
+    network = gf.Network(list(ifos.ifos) if isinstance(ifos, gf.Detectors) else list(ifos))
+    times = np.asarray(y["CENTRAL_TIME"], np.float64)
+    offsets = np.empty(times.shape[:2])
+    for g in range(times.shape[1]):
+        delays = np.asarray(network.get_time_delay(
+            np.asarray(y["RIGHT_ASCENSION_RADIANS"])[:, g], np.asarray(y["DECLINATION_RADIANS"])[:, g]), np.float64)
+        offsets[:, g] = np.nanmean(times[:, g] * window_seconds - window_seconds / 2.0 - delays, axis=-1)
+    return np.round(offsets * sample_rate_hertz).astype(np.int64)
+
+
 def digests(name, full=False):
-    """The case's digest at each of ADDRESSES: of its drawn labels, or of its whole batch where ``full``."""
-    _, _, _, labels = CASES[name]
+    """The case's digest at each of ADDRESSES: of its drawn labels, placement and white noise, or of its whole batch."""
+    _, ifos, noise, labels = CASES[name]
     drawn = {getattr(key, "name", str(key)) for key in (*SKY, *labels)}
     out = []
     for group, index in ADDRESSES:
         x, y = dataset(name, group)[index]
-        arrays = {**x, **y} if full else {key: value for key, value in y.items() if key in drawn}
-        out.append(digest(arrays))
+        arrays = {key: value for key, value in y.items() if key in drawn}
+        arrays["placement"] = placement(y, ifos)
+        if noise is gf.NoiseType.WHITE:
+            arrays["noise sign"] = np.packbits(np.signbit(np.asarray(x["OFFSOURCE"])))
+        out.append(digest({**x, **y} if full else arrays))
     return out
 
 

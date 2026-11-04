@@ -92,9 +92,20 @@ class Violation:
     signals. A violation is a frozen dataclass of its parameters with its
     ``code``, and it acts only through the hooks below, each of which changes
     nothing by default: the hard example calls every hook and holds no case of
-    its own, so a new violation is one class.
+    its own, so a new violation is one class. The base itself, and a class
+    that names no ``code``, is no violation and is refused by name.
     """
     code : ClassVar[ViolationCode]
+
+    def __new__(cls, *args, **kwargs):
+        # Here, not in __post_init__, so that a subclass's own __post_init__ cannot skip it.
+        if not isinstance(getattr(cls, "code", None), ViolationCode):
+            raise TypeError(
+                f"{cls.__name__} names no code (a gf.ViolationCode), so it labels nothing: gf.Violation is the base "
+                "of the violations, not one. Use gf.WrongDelay, gf.MismatchedWaveforms or gf.TimeReversed, or give "
+                "a subclass its code."
+            )
+        return super().__new__(cls)
 
     def check(self, generator : WaveformGenerator) -> None:
         """Refuse by name a generator whose signals it cannot violate, wherever the hard example is used."""
@@ -691,6 +702,24 @@ class HardExampleGenerator(WaveformGenerator):
         self.distributed_attributes = generator.distributed_attributes
         # Its network is set last, so the checks it runs (``_check``) see the rest.
         self.network = generator.network
+
+    def __repr__(self) -> str:
+        return f"HardExampleGenerator(generator={self.generator!r}, violation={self.violation!r}, name={self.name!r})"
+
+    @property
+    def independent_waveforms(self) -> int:
+        """Its generator's: the violation changes what the detectors receive, not what the polarisations carry."""
+        return self.generator.independent_waveforms
+
+    @property
+    def shape_attributes(self) -> Tuple[str, ...]:
+        """Its generator's, whose draws it makes."""
+        return self.generator.shape_attributes
+
+    @property
+    def extent_attributes(self) -> Tuple[str, ...]:
+        """Its generator's, whose draws it makes."""
+        return self.generator.extent_attributes
 
     def specification(self) -> dict:
         """
