@@ -5,19 +5,24 @@ networks of bundled detectors), which ``test_determinism.py`` checks every
 later version against, so a change that adds a generator or a stream moves
 none of theirs.
 
-A digest covers a batch's drawn labels (the sky, the polarisation, the
-scaling target, the generator's parameters and the detectors present), its
-placement and, for white noise, its noise: the values the seed tree's
-streams give, which NumPy draws to the same bits on every platform. The
-placement is each example's offset from the window's centre in whole
-samples, from CENTRAL_TIME less each detector's delay at the drawn sky
-(rounded, so the float32 arithmetic between them cannot move it); the noise
-is the sign of each offsource sample, which no platform's rounding of a
-Gaussian draw flips. The strain the draws make, and coloured noise, pass
-through floating-point kernels whose bits may differ between platforms and
-library versions, so they are not pinned; ``--full`` prints every case's
-whole-batch digest instead, to compare two versions of the library on one
-host.
+A digest covers a batch's drawn labels (the sky, the polarisation, the scaling
+target, the generator's parameters and the detectors present, and each
+component's parameters for an incoherent injection, whose own labels hold them
+only where they agree), its placement and its noise: the values the seed
+tree's streams give, which NumPy draws to the same bits on every platform, and
+JAX's Gaussian noise, whose sign its uniform bits set. The placement is each
+example's offset from the window's centre in whole samples, from CENTRAL_TIME
+less each detector's delay at the drawn sky (rounded, so the float32
+arithmetic between them cannot move it). White offsource noise, returned as it
+is drawn, is pinned by each sample's sign, which no platform's rounding of a
+Gaussian draw flips. Noise that arithmetic has touched, coloured noise and the
+onsource less its injections, is pinned by the sign of its sum over each block
+of ``BLOCK`` samples: the sum of independent or correlated noise is near zero,
+where rounding could flip it, far more rarely than one sample is. The strain
+the draws make passes through floating-point kernels whose bits may differ
+between platforms and library versions, so it is not pinned; ``--full`` prints
+every case's whole-batch digest instead, to compare two versions of the
+library on one host.
 
 Run from the repository root, against the version to pin:
 
@@ -36,6 +41,10 @@ RV, WP = gf.ReturnVariables, gf.WaveformParameters
 SKY = (WP.RIGHT_ASCENSION_RADIANS, WP.DECLINATION_RADIANS, WP.POLARIZATION_RADIANS, gf.ScalingTypes.SNR)
 #: Each case's batches: (split, index).
 ADDRESSES = (("train", 0), ("train", 3), ("validate", 1))
+#: The samples a block of noise that arithmetic has touched sums.
+BLOCK = 64
+#: What each incoherent component drew, by its tag, split and batch index.
+DRAWN = {}
 
 
 def uniform(low, high, dtype=float):
@@ -50,6 +59,30 @@ def wnb():
     return gf.WNBGenerator(scaling_method=snr(), duration_seconds=uniform(0.1, 0.3),
                            min_frequency_hertz=uniform(40.0, 80.0), max_frequency_hertz=uniform(120.0, 200.0))
 
+
+class RecordedBurst(gf.WNBGenerator):
+    """
+    A white-noise burst that keeps what each call draws (``DRAWN``), under its
+    ``tag``, the call's split and its batch index: an incoherent injection's
+    labels hold its components' draws only where they agree, so its
+    components' own are read here, as the dataset's copies of them draw them.
+    """
+
+    def generate(self, num_waveforms, sample_rate_hertz, duration_seconds, streams=None):
+        waveforms, parameters = super().generate(num_waveforms, sample_rate_hertz, duration_seconds, streams)
+        DRAWN[self.tag, streams.split, streams.k] = parameters
+        return waveforms, parameters
+
+
+def recorded_burst(tag):
+    burst = RecordedBurst(scaling_method=snr(), duration_seconds=uniform(0.1, 0.3),
+                          min_frequency_hertz=uniform(40.0, 80.0), max_frequency_hertz=uniform(120.0, 200.0))
+    burst.tag = tag
+    return burst
+
+
+#: An incoherent injection's components' drawn labels.
+COMPONENT_LABELS = (WP.DURATION_SECONDS, WP.MIN_FREQUENCY_HERTZ, WP.MAX_FREQUENCY_HERTZ)
 
 #: Each case: its generators, network and noise, and the drawn labels it returns.
 CASES = {
@@ -74,7 +107,8 @@ CASES = {
     "two generators": (lambda: [wnb(), gf.RingdownGenerator(scaling_method=snr(), frequency_hertz=150.0,
                                                             damping_time_seconds=0.02)],
                        [gf.IFO.H1, gf.IFO.L1], gf.NoiseType.WHITE, (WP.DURATION_SECONDS,)),
-    "incoherent": (lambda: [gf.IncoherentGenerator([wnb(), wnb()])], [gf.IFO.H1, gf.IFO.L1], gf.NoiseType.WHITE, ()),
+    "incoherent": (lambda: [gf.IncoherentGenerator([recorded_burst(0), recorded_burst(1)])], [gf.IFO.H1, gf.IFO.L1],
+                   gf.NoiseType.WHITE, ()),
     "bundled detectors": (lambda: [wnb()], gf.Detectors([gf.IFO.H1, gf.IFO.L1, gf.IFO.V1],
                                                        num_present=uniform(2, 3, int)),
                           gf.NoiseType.WHITE, (RV.DETECTOR_MASK, WP.DURATION_SECONDS)),
@@ -114,18 +148,39 @@ def placement(y, ifos, sample_rate_hertz=512.0, window_seconds=1.0):
     return np.round(offsets * sample_rate_hertz).astype(np.int64)
 
 
-def digests(name, full=False):
-    """The case's digest at each of ADDRESSES: of its drawn labels, placement and white noise, or of its whole batch."""
+def block_signs(noise):
+    """The sign of the sum of each block of ``BLOCK`` samples of ``noise`` (..., Samples), in float64, packed."""
+    noise = np.asarray(noise, np.float64)
+    blocks = noise.reshape(noise.shape[:-1] + (noise.shape[-1] // BLOCK, BLOCK))
+    return np.packbits(np.signbit(np.sum(blocks, axis=-1)))
+
+
+def pinned(name, x, y, group, index):
+    """What the case's digest covers in one batch: its drawn labels, its placement and its noise (see the module)."""
     _, ifos, noise, labels = CASES[name]
     drawn = {getattr(key, "name", str(key)) for key in (*SKY, *labels)}
+    arrays = {key: value for key, value in y.items() if key in drawn}
+    arrays["placement"] = placement(y, ifos)
+    onsource_noise = np.asarray(x["ONSOURCE"], np.float64) - np.sum(np.asarray(y["INJECTIONS"], np.float64), axis=1)
+    arrays["onsource noise sign"] = block_signs(onsource_noise)
+    if noise is gf.NoiseType.WHITE:
+        arrays["noise sign"] = np.packbits(np.signbit(np.asarray(x["OFFSOURCE"])))
+    else:
+        arrays["noise sign"] = block_signs(x["OFFSOURCE"])
+    for (tag, split, k), parameters in sorted(DRAWN.items(), key=lambda item: str(item[0])):
+        if split == group and k == index:
+            for key in COMPONENT_LABELS:
+                arrays[f"component {tag} {key.name}"] = np.asarray(parameters[key])
+    return arrays
+
+
+def digests(name, full=False):
+    """The case's digest at each of ADDRESSES: of what it pins (``pinned``), or of its whole batch."""
     out = []
     for group, index in ADDRESSES:
+        DRAWN.clear()
         x, y = dataset(name, group)[index]
-        arrays = {key: value for key, value in y.items() if key in drawn}
-        arrays["placement"] = placement(y, ifos)
-        if noise is gf.NoiseType.WHITE:
-            arrays["noise sign"] = np.packbits(np.signbit(np.asarray(x["OFFSOURCE"])))
-        out.append(digest({**x, **y} if full else arrays))
+        out.append(digest({**x, **y} if full else pinned(name, x, y, group, index)))
     return out
 
 

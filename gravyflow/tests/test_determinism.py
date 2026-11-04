@@ -762,8 +762,9 @@ STREAM_DIGESTS, PINNED = _stream_digests()
 class TestPinnedStreams:
     """
     The datasets of every generator and of per-example networks of bundled detectors draw what they drew when their
-    digests were pinned, before hard examples were added (their labels, placement and white noise): a later generator
-    or stream moves none of theirs.
+    digests were pinned, before hard examples were added (their labels, an incoherent injection's components' among
+    them, their placement and their noise, offsource and onsource, white and coloured): a later generator or stream
+    moves none of theirs.
     """
 
     def test_the_reference_pins_every_case(self):
