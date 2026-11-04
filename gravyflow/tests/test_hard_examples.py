@@ -771,9 +771,11 @@ def test_a_hard_examples_declarations_are_its_generators():
     hard = gf.HardExampleGenerator(aligned, gf.WrongDelay(0.005), name="late")
     assert hard.independent_waveforms == aligned.independent_waveforms == 1
     assert hard.shape_attributes == aligned.shape_attributes and hard.extent_attributes == aligned.extent_attributes
+    assert hard.repeats_when_cut is aligned.repeats_when_cut is True
     burst = gf.HardExampleGenerator(wnb(), gf.MismatchedWaveforms("noise"))
     assert burst.shape_attributes == gf.WNBGenerator.shape_attributes
     assert burst.extent_attributes == gf.WNBGenerator.extent_attributes
+    assert burst.repeats_when_cut is gf.WNBGenerator.repeats_when_cut is False
     assert repr(hard) == f"HardExampleGenerator(generator={aligned!r}, violation=WrongDelay(margin_seconds=" \
         f"{gf.WrongDelay(0.005).margin_seconds!r}), name='late')"
 
@@ -863,19 +865,25 @@ def _draw_spread(generator, violation, num_detectors):
     return spread
 
 
-def _unfit_share(strains, delays, independent, antenna=None):
+def _unfit_share(strains, delays, independent, antenna=None, edge_samples=0):
     """
     The share of the detectors' signal power (strains, (Detectors, Time)) that no source whose polarisations carry
     ``independent`` waveforms gives them, for each set of arrival delays (delays, (Skies, Detectors)): each detector's
     spectrum aligned by its delay, its best fit by that many free waveforms, each with a complex gain per detector
     (any polarisation angle and state), within the span of the detectors' antenna patterns (antenna, (Detectors, 2):
-    F+ and Fx at one polarisation angle) where given, any gains where not.
+    F+ and Fx at one polarisation angle) where given, any gains where not. With ``edge_samples``, only the times that
+    far from the window's edges are fit (the aligned signals, analytic): those every detector's window holds at any
+    delay up to that, for signals the window cuts off at times their delays apart.
     """
     num_samples = strains.shape[-1]
     spectra = np.fft.rfft(np.asarray(strains, np.float64), n=2 * num_samples, axis=-1)
     frequencies = np.fft.rfftfreq(2 * num_samples, 1.0 / SAMPLE_RATE)
     aligned = spectra[None] * np.exp(2j * np.pi * frequencies * np.asarray(delays, np.float64)[..., None])
-    total = np.sum(np.abs(spectra) ** 2)
+    if edge_samples:
+        analytic = np.zeros(aligned.shape[:-1] + (2 * num_samples,), complex)
+        analytic[..., :aligned.shape[-1]] = aligned
+        aligned = np.fft.ifft(analytic, axis=-1)[..., edge_samples:num_samples - edge_samples]
+    total = np.sum(np.abs(aligned) ** 2, axis=(-2, -1))
     if antenna is not None:
         basis, _ = np.linalg.qr(np.asarray(antenna, np.float64))
         aligned = np.einsum("ij,gjf->gif", basis @ basis.T, aligned)
@@ -938,6 +946,92 @@ def test_a_coherence_violation_needs_more_detectors_than_its_generators_waveform
         # A binary's masses drawn 0.2 % of their range apart leave 3e-5, 7 % apart 3e-4, 15 % apart 2e-3; a
         # chirplet's start frequencies 4 % apart leave 2e-4.
         assert min(taken[apart]) > 2.0 * max(coherent) and min(taken[apart]) > 1e-4, (name, violation, taken, coherent)
+
+
+#: Each generator whose signal, cut off by the window (allow_partially_out_of_window), can repeat itself
+#: (repeats_when_cut), its signals short enough to lie whole in the window.
+REPEATING = {
+    "periodic wave": lambda **kwargs: gf.PeriodicWaveGenerator(
+        frequency_hertz=uniform(80.0, 120.0), duration_seconds=0.2, **SNR_SCALED, **kwargs),
+    "chirplet of one frequency": lambda **kwargs: gf.ChirpletGenerator(
+        start_frequency_hertz=uniform(90.0, 110.0), end_frequency_hertz=uniform(105.0, 120.0), duration_seconds=0.2,
+        **SNR_SCALED, **kwargs),
+    "sine-Gaussian": lambda **kwargs: gf.SineGaussianGenerator(
+        frequency_hertz=100.0, quality_factor=20.0, **SNR_SCALED, **kwargs),
+    "ringdown": lambda **kwargs: ringdown(**kwargs),
+    "binary": lambda **kwargs: binary(min_frequency_hertz=40.0, **kwargs),
+}
+
+
+@pytest.mark.parametrize("name", REPEATING)
+def test_a_wrong_delay_is_refused_where_a_signal_cut_by_the_window_can_repeat(name):
+    """
+    What a window holds of a signal it cuts off can repeat itself: a periodic wave, a chirplet whose start and end
+    frequencies can be equal, or a sine-Gaussian, a wave of one frequency whose envelope's ends lie outside the window
+    where the signal is longer; a ringdown, a binary's too, one damped mode where its start lies before the window. A
+    time shift of that part is a shift by whole periods, or a gain and a phase, so a wrong delay shows in it only
+    modulo its period, and may be one a real source gives (a plus-only periodic wave of 20 s on H1 and L1, shifted by
+    their light travel plus 10 to 20 ms, is fit by a real source to the same 4e-6 of its power as a real signal is).
+    A wrong delay of partial signals of such a generator is refused by name, whatever their length: when it is built,
+    and by the hard example's own setting, which the injection layer reads, as a dataset binds it and as a batch is
+    projected. One of whole signals is taken.
+    """
+    make = REPEATING[name]
+    ifos = (gf.IFO.H1, gf.IFO.L1)
+    with pytest.raises(ValueError, match="WrongDelay hard example of a .* cannot take partial signals"):
+        gf.HardExampleGenerator(make(network=gf.Network(list(ifos)), allow_partially_out_of_window=True),
+                                gf.WrongDelay(0.01))
+    assert make().repeats_when_cut
+    hard = gf.HardExampleGenerator(make(), gf.WrongDelay(0.01))
+    hard.allow_partially_out_of_window = True
+    with pytest.raises(ValueError, match="cannot take partial signals"):
+        dataset([hard], ifos=ifos)
+    built = dataset([gf.HardExampleGenerator(make(), gf.WrongDelay(0.01))], ifos=ifos)
+    built[0]
+    built.waveform_generators[0].allow_partially_out_of_window = True
+    with pytest.raises(ValueError, match="cannot take partial signals"):
+        built[1]
+
+
+#: Each generator whose signal, cut off by the window, never repeats itself, long enough that the window cuts it off,
+#: and the independent waveforms its polarisations carry.
+CUT = {
+    "white-noise burst": (lambda **kwargs: wnb(duration_seconds=constant(4.0), **kwargs), 2),
+    "chirplet": (lambda **kwargs: gf.ChirpletGenerator(
+        start_frequency_hertz=50.0, end_frequency_hertz=200.0, duration_seconds=4.0, polarization_eccentricity=0.5,
+        **SNR_SCALED, **kwargs), 1),
+}
+
+
+@pytest.mark.parametrize("name", CUT)
+def test_a_wrong_delay_shows_in_a_signal_cut_by_the_window_where_it_cannot_repeat(name):
+    """
+    A white-noise burst's content never repeats, nor does a chirp whose frequency changes: a wrong delay of their
+    partial signals, the window inside them, is taken, and shows. Measured as the reachability test measures it, on
+    the times every detector's window holds (the window cuts each detector's signal at times their delays apart): on
+    the smallest network taken, no sky fits the hard example as near as a real signal is fit at its own sky.
+    """
+    make, independent = CUT[name]
+    cut = dict(allow_partially_out_of_window=True, **SKY)
+    assert not make().repeats_when_cut
+    ifos = NETWORK[:independent + 1]
+    network = gf.Network(list(ifos))
+    delays = np.asarray(network.get_time_delay(
+        np.float32([SKY["right_ascension_radians"]]), np.float32([SKY["declination_radians"]])), np.float64)
+    antenna = np.asarray(network.get_antenna_pattern(
+        np.float32([SKY["right_ascension_radians"]]), np.float32([SKY["declination_radians"]]),
+        np.float32([SKY["polarization_radians"]])), np.float64)[0]
+    skies = np.asarray(network.get_time_delay(*(np.float32(angle) for angle in _fibonacci_sky(4000))), np.float64)
+    real = np.asarray(dataset([make(**cut, name="w")], ifos=ifos)[0][1]["INJECTIONS"], np.float64)[:, 0]
+    hard = np.asarray(dataset([gf.HardExampleGenerator(make(**cut), gf.WrongDelay(uniform(0.01, 0.02)), name="w")],
+                              ifos=ifos)[0][1]["INJECTIONS"], np.float64)[:, 0]
+    # Every arrival lies within the detector margin, 21 ms, of the geocentre's.
+    edge = int(np.ceil(network.max_geocentre_delay_seconds() * SAMPLE_RATE))
+    coherent = [_unfit_share(real[b], delays, independent, antenna, edge)[0] for b in range(BATCH)]
+    taken = [np.min(_unfit_share(hard[b], skies, independent, edge_samples=edge)) for b in range(BATCH)]
+    print(f"{name} cut by the window, on {len(ifos)} detectors: real {max(coherent):.2e}, "
+          f"taken {min(taken):.2e} to {max(taken):.2e}")
+    assert min(taken) > 10.0 * max(coherent) and min(taken) > 1e-4, (name, coherent, taken)
 
 
 def _local_axes(latitude, longitude):

@@ -12,7 +12,8 @@ differs from a real one in its violation alone:
 - ``gf.WrongDelay``: one present detector's copy is shifted so that its delay
   from another present detector is that pair's light-travel time plus a margin,
   in the direction that keeps it where the generator's signals arrive where
-  only one does;
+  only one does (of whole signals, for a generator whose signal cut by the
+  window can repeat);
 - ``gf.MismatchedWaveforms``: each detector has a waveform of its own, its
   differing draws its own and the rest shared;
 - ``gf.TimeReversed``: the waveform runs backwards in time, for a generator
@@ -206,6 +207,19 @@ class WrongDelay(Violation):
     light travel plus the largest margin), for the generator's longest
     signal, cannot hold the copy whatever the placement and is refused by
     name when the dataset is built and as the copy is projected.
+
+    A delay shows only where the window holds something of the signal that a
+    shift changes: its envelope's ends, a changing frequency, its content.
+    What a window holds of a signal it cuts off can repeat itself (the
+    generator's ``repeats_when_cut``: a periodic wave, a chirplet whose start
+    and end frequencies can be equal, or a sine-Gaussian, longer than the
+    window; a ringdown's tail, a binary's included), and a shift of that part
+    is a shift by whole periods, or a gain and a phase, so its delay shows only
+    modulo its period, and a wrong delay may be a real one. So partial
+    signals (the hard example's own allow_partially_out_of_window) of such a
+    generator are refused by name. A whole signal shows its shift by as much
+    as its envelope changes: a long periodic wave, or a sine-Gaussian of high
+    quality factor, little.
     """
     margin_seconds : Union[float, "gf.Distribution"]
 
@@ -225,6 +239,19 @@ class WrongDelay(Violation):
     @property
     def max_margin_seconds(self) -> float:
         return float(get_support_bounds(self.margin_seconds, "WrongDelay's margin_seconds")[1])
+
+    def check(self, hard_example):
+        """Refuse by name partial signals of a generator whose signal cut by the window can repeat (see the class)."""
+        generator = hard_example.generator
+        if hard_example.allow_partially_out_of_window and generator.repeats_when_cut:
+            raise ValueError(
+                f"A WrongDelay hard example of a {type(generator).__name__} cannot take partial signals "
+                "(allow_partially_out_of_window): what the window holds of a signal it cuts off can repeat itself "
+                "(repeats_when_cut: a wave of one frequency or period, its envelope's ends outside the window, or a "
+                "ringdown's tail), and a time shift of that is a shift by whole periods, or a gain and a phase, so "
+                "its delay shows only modulo its period and a wrong delay may be one a real source gives. Keep its "
+                "signals whole in the window."
+            )
 
     def reach_seconds(self, network) -> float:
         """``network``'s longest light travel plus the largest margin: 0.0 without a network."""
@@ -694,7 +721,9 @@ class HardExampleGenerator(WaveformGenerator):
     every subset of its fewest present detectors counted; where a
     slot's geometry is drawn, its fewest present detectors are checked when it
     is set and each example as it is projected. TimeReversed takes only a
-    binary, whose reversal leaves its family (gf.TimeReversed).
+    binary, whose reversal leaves its family (gf.TimeReversed), and WrongDelay
+    no partial signals of a generator whose signal cut by the window can
+    repeat itself (``repeats_when_cut``, gf.WrongDelay).
 
     Every check runs wherever the hard example is used, as its network is set
     (when it is built, and as a dataset binds it) and as each batch is
@@ -745,6 +774,11 @@ class HardExampleGenerator(WaveformGenerator):
     def extent_attributes(self) -> Tuple[str, ...]:
         """Its generator's, whose draws it makes."""
         return self.generator.extent_attributes
+
+    @property
+    def repeats_when_cut(self) -> bool:
+        """Its generator's, whose signals it makes."""
+        return self.generator.repeats_when_cut
 
     def specification(self) -> dict:
         """

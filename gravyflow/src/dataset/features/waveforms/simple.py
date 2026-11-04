@@ -408,6 +408,17 @@ class ChirpletGenerator(gf.WaveformGenerator):
     # beside envelope x cos), rescaled by the eccentricity.
     independent_waveforms: ClassVar[int] = 1
 
+    @property
+    def repeats_when_cut(self) -> bool:
+        """
+        Where its start and end frequencies can be equal: then it is a wave of
+        one frequency, which repeats where the window cuts its envelope's ends
+        off. Elsewhere its frequency changes throughout, so it never repeats.
+        """
+        start_low, start_high = _finite_bounds(self, "start_frequency_hertz")
+        end_low, end_high = _finite_bounds(self, "end_frequency_hertz")
+        return bool(start_low <= end_high and end_low <= start_high)
+
     distributed_attributes: Tuple[str] = (
         "start_frequency_hertz",
         "end_frequency_hertz",

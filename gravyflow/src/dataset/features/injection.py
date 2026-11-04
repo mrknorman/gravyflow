@@ -456,6 +456,22 @@ class WaveformGenerator:
     time_reversal_leaves_family : ClassVar[bool] = False
 
     @property
+    def repeats_when_cut(self) -> bool:
+        """
+        Whether what a window holds of its signal, where the window cuts the
+        signal off (allow_partially_out_of_window), can repeat itself: a wave
+        of one frequency or one period, its envelope's ends outside the
+        window, or one damped mode, a ringdown's (a binary's among them), its
+        start before the window. A time shift of such a part is a shift by
+        whole periods, or a gain and a phase, but for its envelope's slow
+        change, so a delay shows in it only modulo its period and a wrong
+        delay may be one a real source gives (gf.WrongDelay refuses it).
+        Declared by each generator whose cut signal never repeats: where it
+        declares none, the safe answer, that it can.
+        """
+        return True
+
+    @property
     def independent_waveforms(self) -> int:
         """
         How many independent waveforms its polarisations carry: 1 where the
@@ -990,6 +1006,9 @@ class WNBGenerator(WaveformGenerator):
     # burst's own band edges give it a duration of its own.
     extent_attributes : ClassVar[Tuple[str, ...]] = (
         "duration_seconds", "min_frequency_hertz", "max_frequency_hertz")
+
+    # Its content is noise, which repeats nowhere a window may cut it.
+    repeats_when_cut : ClassVar[bool] = False
 
     @property
     def independent_waveforms(self) -> int:

@@ -144,8 +144,8 @@ repository before it may need the changes below.
   it as the generator's signals, so it differs in its violation alone. Its scaling method, injection chance, padding,
   allow_partially_out_of_window, sky and reference time are its generator's when it is built: the injection layer
   reads them from it, and they fingerprint it beside its generator and violation. Its independent_waveforms,
-  shape_attributes and extent_attributes are its generator's, and every check it makes of its generator, its scaling
-  and its network runs wherever it is used: as its network is set (when it is built, and as a dataset binds it) and as
+  shape_attributes, extent_attributes and repeats_when_cut are its generator's, and every check it makes of its
+  generator, its own settings and its network runs wherever it is used: as its network is set (when it is built, and as a dataset binds it) and as
   each batch is projected, since its generator may change after it is built. `gf.Violation`, the base, a subclass
   that names no code, and one whose code is NONE, which would label its examples real signals, are refused by name.
   There is no one-detector violation (a signal in one detector alone): a lone copy in one detector is reachable by a
@@ -163,7 +163,14 @@ repository before it may need the changes below.
   margin from the window's edges and inside the padding, widened by that margin), by its direction: the drawn one,
   or the other where only that keeps it there. So a copy reaches no part of the window a real arrival does not; a
   window or padding too narrow for that is refused by name when the dataset is built and as the copy is projected,
-  so a `gf.InjectionGenerator` used alone refuses it too.
+  so a `gf.InjectionGenerator` used alone refuses it too. A delay shows only where the window holds something a shift
+  changes, and what a window holds of a signal it cuts off can repeat itself (each generator's `repeats_when_cut`: a
+  periodic wave, a sine-Gaussian or a chirplet whose start and end frequencies can be equal, its envelope's ends
+  outside the window, or a ringdown's tail, a binary's included; never a white-noise burst's noise or a chirplet's
+  changing frequency, and the safe answer, that it can, for a generator that declares none). A shift of that part is
+  a shift by whole periods, or a gain and a phase, so a wrong delay of partial signals of such a generator is refused
+  by name. A whole signal shows its shift by as much as its envelope changes: a long periodic wave or a sine-Gaussian
+  of high quality factor, little.
 
 - **Hard examples: mismatched waveforms.** `gf.MismatchedWaveforms(differ, correlation=None)` gives each detector a
   waveform of its own, differing in the named draws with every other draw shared. A named draw is a parameter or a
