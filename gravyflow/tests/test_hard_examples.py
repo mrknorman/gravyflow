@@ -10,9 +10,10 @@ import pickle
 
 import numpy as np
 import pytest
+import scipy.optimize
 
 import gravyflow as gf
-from gravyflow.src.dataset.conditioning.detector import C
+from gravyflow.src.dataset.conditioning.detector import C, arm_tensors
 from gravyflow.src.dataset.features.hard_examples import _MismatchedStreams
 from gravyflow.src.dataset.features.injection import SIGNAL_EXTENT
 from gravyflow.src.rng.consumers import check_consumer
@@ -44,6 +45,11 @@ def ringdown(**kwargs):
     return gf.RingdownGenerator(**{
         "scaling_method": gf.ScalingMethod(constant(TARGET_SNR), gf.ScalingTypes.SNR),
         "frequency_hertz": constant(100.0), "damping_time_seconds": constant(0.02), **kwargs})
+
+
+def elliptical(**kwargs):
+    """A ringdown of eccentricity 0.5, which no source of it gives linearly polarised: one detector needs three present."""
+    return ringdown(polarization_eccentricity=0.5, **kwargs)
 
 
 def dataset(generators, ifos=(gf.IFO.H1, gf.IFO.L1, gf.IFO.V1), seed=3, outputs=(), group="train"):
@@ -80,7 +86,8 @@ def test_the_violations_draw_from_registered_streams():
 def test_a_real_signal_is_labelled_none_and_each_hard_example_its_violation():
     violations = [gf.WrongDelay(0.01), gf.OneDetector(), gf.MismatchedWaveforms(("noise",)), gf.TimeReversed()]
     generators = [wnb(name="real")] + [
-        gf.HardExampleGenerator(ringdown() if isinstance(violation, gf.TimeReversed) else wnb(), violation,
+        gf.HardExampleGenerator(ringdown() if isinstance(violation, gf.TimeReversed) else
+                                elliptical() if isinstance(violation, gf.OneDetector) else wnb(), violation,
                                 name=f"hard{j}") for j, violation in enumerate(violations)]
     _, y = dataset(generators)[0]
     expected = [gf.ViolationCode.NONE] + [violation.code for violation in violations]
@@ -283,9 +290,10 @@ def test_a_hard_examples_reference_times_fall_where_its_generators_do():
     """A wrong delay's copy is kept where its generator places signals, so no reference time falls elsewhere."""
     network = gf.Network([gf.IFO.H1, gf.IFO.L1, gf.IFO.V1])
     padded = dict(front_padding_duration_seconds=0.1, back_padding_duration_seconds=0.1)
-    real = wnb(network=network, **padded)
-    for violation in (gf.WrongDelay(uniform(0.01, 0.03)), gf.OneDetector(), gf.MismatchedWaveforms("noise")):
-        hard = gf.HardExampleGenerator(wnb(network=network, **padded), violation)
+    for make, violation in ((wnb, gf.WrongDelay(uniform(0.01, 0.03))), (elliptical, gf.OneDetector()),
+                            (wnb, gf.MismatchedWaveforms("noise"))):
+        real = make(network=network, **padded)
+        hard = gf.HardExampleGenerator(make(network=network, **padded), violation)
         assert hard.reference_time_window_seconds(1.0) == real.reference_time_window_seconds(1.0)
         assert hard.detector_margin_seconds() == real.detector_margin_seconds()
 
@@ -297,8 +305,8 @@ def test_one_detector_holds_what_the_real_signals_detector_does(ifos):
     emptied: that one holds exactly what the real signal gives that detector, its SNR a real detector's, not the
     whole network SNR target, and the network SNR (the SNR label) is what is left, that detector's alone.
     """
-    _, real = dataset([wnb(name="w")], ifos=ifos)[0]
-    x, y = dataset([gf.HardExampleGenerator(wnb(), gf.OneDetector(), name="w")], ifos=ifos)[0]
+    _, real = dataset([elliptical(name="w")], ifos=ifos)[0]
+    x, y = dataset([gf.HardExampleGenerator(elliptical(), gf.OneDetector(), name="w")], ifos=ifos)[0]
     present = np.asarray(x["DETECTOR_MASK"]) > 0
     each = np.asarray(y["DETECTOR_SNR"], np.float64)[:, 0]
     holding = each > 0
@@ -685,11 +693,12 @@ def test_hard_examples_refuse_what_they_cannot_be():
         gf.HardExampleGenerator(gf.HardExampleGenerator(wnb(), gf.OneDetector()), gf.OneDetector())
     with pytest.raises(TypeError, match="violation is a gf.Violation"):
         gf.HardExampleGenerator(wnb(), "late")
-    for violation in (gf.WrongDelay(0.01), gf.OneDetector(), gf.MismatchedWaveforms("noise")):
+    for make, violation in ((wnb, gf.WrongDelay(0.01)), (elliptical, gf.OneDetector()),
+                            (wnb, gf.MismatchedWaveforms("noise"))):
         with pytest.raises(ValueError, match="needs 3 detectors present"):
-            gf.HardExampleGenerator(wnb(network=gf.Network([gf.IFO.H1, gf.IFO.L1])), violation)
+            gf.HardExampleGenerator(make(network=gf.Network([gf.IFO.H1, gf.IFO.L1])), violation)
         with pytest.raises(ValueError, match="needs 3 detectors present"):
-            dataset([gf.HardExampleGenerator(wnb(), violation)],
+            dataset([gf.HardExampleGenerator(make(), violation)],
                     ifos=gf.Detectors([gf.IFO.H1, gf.IFO.L1, gf.IFO.V1], num_present=uniform(2, 3, int)))
     # Reversal needs no second detector.
     gf.HardExampleGenerator(ringdown(network=gf.Network([gf.IFO.H1])), gf.TimeReversed())
@@ -805,7 +814,7 @@ def test_a_violation_acts_through_its_own_hooks():
             kept[np.arange(num_examples), np.argmax(present > 0, axis=1)] = 1.0
             return None, kept
 
-    x, y = dataset([gf.HardExampleGenerator(wnb(), FirstDetector())], ifos=DETECTORS)[0]
+    x, y = dataset([gf.HardExampleGenerator(elliptical(), FirstDetector())], ifos=DETECTORS)[0]
     present = np.asarray(x["DETECTOR_MASK"]) > 0
     np.testing.assert_array_equal(np.asarray(y["DETECTOR_SNR"])[:, 0] > 0,
                                   np.arange(present.shape[-1]) == np.argmax(present, axis=1)[:, None])
@@ -889,27 +898,23 @@ def test_a_coherence_violation_needs_more_detectors_than_its_generators_waveform
     Every detector receives a combination of the polarisations, delayed, so a network of no more detectors than the
     independent waveforms the polarisations carry (one for a binary's dominant mode or a burst whose cross
     polarisation is its plus a quarter cycle on, or none; two for a white-noise burst's independent pair) receives
-    any waveforms in them: there a wrong delay, a mismatch or one silent detector is a real signal. And a source that
-    can be linearly polarised silences one detector at any sky by its polarisation angle, so one detector of two
-    holding a signal is a real signal of every generator. Each is refused there by name; on the smallest network
-    taken, no sky and no polarisation gives it.
+    any waveforms in them: there a wrong delay or a mismatch is a real signal. Each is refused there by name; on the
+    smallest network taken, no sky gives it (one silent detector: test_one_detector_needs_more_detectors_than_a_source_silences).
 
     Measured by a least-squares fit of the detectors' noise-free injections by free waveforms: on the refused
     networks (the taken network's examples, fewer detectors kept), at the example's own sky, it leaves nothing; on
-    the taken network it leaves a share of the power that no sky (a wrong delay, a mismatch) or no polarisation at
-    the example's sky (one silent detector) removes, where the generator's real signal leaves next to none at its
-    sky. A mismatch is as far from a real signal as its detectors' draws differ, so it is measured where they
+    the taken network it leaves a share of the power that no sky removes, where the generator's real signal leaves
+    next to none at its sky. A mismatch is as far from a real signal as its detectors' draws differ, so it is measured where they
     differ by at least a twentieth of their range. A binary's merger is kept from the window's edges, which would
     cut its inspiral differently in each detector, and the ringdown rings for long enough to fit the model.
     """
     make, independent, differ = COHERENCE[name]
     generator = make(**SKY)
     assert generator.independent_waveforms == independent
-    violations = [gf.WrongDelay(uniform(0.01, 0.02)), gf.OneDetector()] + \
-        ([] if differ is None else [gf.MismatchedWaveforms(differ)])
+    violations = [gf.WrongDelay(uniform(0.01, 0.02))] + ([] if differ is None else [gf.MismatchedWaveforms(differ)])
     for violation in violations:
         needed = violation.fewest_detectors(generator)
-        assert needed == (3 if isinstance(violation, gf.OneDetector) else independent + 1)
+        assert needed == independent + 1
         with pytest.raises(ValueError, match=f"needs {needed} detectors present"):
             dataset([gf.HardExampleGenerator(make(**SKY), violation)], ifos=NETWORK[:needed - 1])
         ifos = NETWORK[:needed]
@@ -924,18 +929,11 @@ def test_a_coherence_violation_needs_more_detectors_than_its_generators_waveform
         hard = np.asarray(dataset([gf.HardExampleGenerator(make(**SKY), violation, name="w")], ifos=ifos)[0][1][
             "INJECTIONS"], np.float64)[:, 0]
         kept = [list(rows) for rows in itertools.combinations(range(needed), needed - 1)]
-        # One silent detector's data holds one waveform, so one free waveform fits it as two do: the two free
-        # polarisations, which fit any real signal exactly, measure it.
-        fitted = 2 if isinstance(violation, gf.OneDetector) else independent
         refused, taken, coherent = [], [], []
         for b in range(BATCH):
-            coherent.append(_unfit_share(real[b], delays, fitted, antenna)[0])
-            # Each refused network that receives the signal: one silent detector's alone receives none.
-            refused.extend(_unfit_share(hard[b][rows], delays[:, rows], fitted, antenna[rows])[0]
-                           for rows in kept if np.any(hard[b][rows] != 0.0))
-            taken.append(_unfit_share(hard[b], delays, fitted, antenna)[0]
-                         if isinstance(violation, gf.OneDetector) else
-                         np.min(_unfit_share(hard[b], skies, independent)))
+            coherent.append(_unfit_share(real[b], delays, independent, antenna)[0])
+            refused.extend(_unfit_share(hard[b][rows], delays[:, rows], independent, antenna[rows])[0] for rows in kept)
+            taken.append(np.min(_unfit_share(hard[b], skies, independent)))
         spread = _draw_spread(generator, violation, needed)
         apart = spread >= 0.05
         taken = np.asarray(taken)
@@ -949,6 +947,158 @@ def test_a_coherence_violation_needs_more_detectors_than_its_generators_waveform
         # A binary's masses drawn 0.2 % of their range apart leave 3e-5, 7 % apart 3e-4, 15 % apart 2e-3; a
         # chirplet's start frequencies 4 % apart leave 2e-4.
         assert min(taken[apart]) > 2.0 * max(coherent) and min(taken[apart]) > 1e-4, (name, violation, taken, coherent)
+
+
+def _response(detector):
+    """A bundled detector's (a gf.IFO) or a site's (a gf.Site) response tensor, float64."""
+    if isinstance(detector, gf.IFO):
+        return np.asarray(gf.Network([detector]).response, np.float64)[0]
+    site = detector.value
+    return arm_tensors(site.longitude_radians, site.latitude_radians, site.x_angle_radians, site.y_angle_radians,
+                       site.x_altitude_radians, site.y_altitude_radians)[-1]
+
+
+def _antenna(responses, angles):
+    """Each detector's (F+, Fx) for a source from (right ascension, declination, polarisation angle): (..., D, 2)."""
+    ra, dec, psi = (np.asarray(angle, np.float64) for angle in angles)
+    n = np.stack([np.cos(dec) * np.cos(ra), np.cos(dec) * np.sin(ra), np.sin(dec)], -1)
+    m = np.stack([np.sin(ra), -np.cos(ra), np.zeros_like(ra)], -1)
+    l = np.cross(n, m)
+    m, l = np.cos(psi)[..., None] * m + np.sin(psi)[..., None] * l, np.cos(psi)[..., None] * l - np.sin(psi)[..., None] * m
+    plus = np.einsum("...i,dij,...j->...d", m, responses, m) - np.einsum("...i,dij,...j->...d", l, responses, l)
+    cross = 2.0 * np.einsum("...i,dij,...j->...d", m, responses, l)
+    return np.stack([plus, cross], -1)
+
+
+def _silent_share(responses, kept, quadrature, angles):
+    """
+    The share of the best real source's power that the detectors other than ``kept`` receive, the part of a signal in
+    ``kept`` alone that it leaves unfit, at each sky and polarisation angle: for a source of proportional
+    polarisations (``quadrature`` None) of any pair, the share outside the span of the detectors' antenna patterns;
+    for one whose cross polarisation is its plus a quarter cycle on, rescaled by ``quadrature``, |F+|^2 +
+    quadrature^2 |Fx|^2 in the other detectors over all of them.
+    """
+    antenna = _antenna(responses, angles)
+    if quadrature is None:
+        basis, _ = np.linalg.qr(antenna)
+        return 1.0 - np.sum(basis[..., kept, :] ** 2, axis=-1)
+    power = antenna[..., 0] ** 2 + quadrature ** 2 * antenna[..., 1] ** 2
+    return 1.0 - power[..., kept] / np.sum(power, axis=-1)
+
+
+def _least_silent_share(responses, kept, quadrature):
+    """The least ``_silent_share`` over the sky and the polarisation angle: on a grid, then refined from its best."""
+    ra, dec = _fibonacci_sky(20000)
+    psi = np.linspace(0.0, np.pi, 1 if quadrature is None else 37, endpoint=False)
+    grid = [np.repeat(ra, psi.size), np.repeat(dec, psi.size), np.tile(psi, ra.size)]
+    shares = _silent_share(responses, kept, quadrature, grid)
+    best = np.inf
+    for start in np.argsort(shares)[:10]:
+        result = scipy.optimize.minimize(
+            lambda x: float(np.squeeze(_silent_share(responses, kept, quadrature, x))), [angle[start] for angle in grid],
+            method="Nelder-Mead", options=dict(xatol=1e-12, fatol=1e-16, maxiter=4000))
+        best = min(best, result.fun)
+    return best
+
+
+#: Five detectors at five sites, and four of them.
+FIVE = (gf.IFO.H1, gf.IFO.L1, gf.IFO.V1, gf.Site.K1, gf.Site.I1)
+FIVE_DETECTORS = gf.Detectors([*FIVE[:3], *(gf.DetectorSlot.at(site, gf.IFO.L1) for site in FIVE[3:])])
+
+
+@pytest.mark.parametrize("name", COHERENCE)
+def test_one_detector_needs_more_detectors_than_a_source_silences(name):
+    """
+    One detector's signal says nothing of the source's sky or polarisation, so it is real wherever a source of the
+    generator, at any sky, leaves the other detectors silent. A source whose polarisations cannot be proportional is
+    silent in a detector only at its nulls, so a null of one other detector suffices on two detectors and no sky
+    silences two: it needs three. One that can be linearly polarised is silenced in a detector by one condition on
+    its sky and polarisation angle: three detectors together at isolated skies, never four, so it needs five. Each
+    is refused by name on fewer; measured on the detectors' antenna patterns, for every detector kept, on the refused
+    network the best source leaves the others nothing, and on the taken one a share no sky or angle removes. The
+    product's examples hold their signal in one detector alone, so this share is their best fit's.
+    """
+    make, independent, _ = COHERENCE[name]
+    generator = make(**SKY)
+    linear = name in ("white-noise burst", "linear white-noise burst", "periodic wave")
+    assert generator.linearly_polarisable == linear
+    needed = gf.OneDetector().fewest_detectors(generator)
+    assert needed == (5 if linear else 3)
+    with pytest.raises(ValueError, match=f"needs {needed} detectors present"):
+        dataset([gf.HardExampleGenerator(make(**SKY), gf.OneDetector())], ifos=FIVE_DETECTORS.detectors[:needed - 1])
+    quadrature = None
+    if not linear:
+        waveforms, _ = make().generate(1, SAMPLE_RATE, 1.0, gf.SeedTree(2).batch("train", 0, 0).sub("wave/w"))
+        plus, cross = np.asarray(waveforms, np.float64)[0]
+        quadrature = np.sqrt(np.sum(cross ** 2) / np.sum(plus ** 2))
+    responses = np.stack([_response(detector) for detector in FIVE[:needed]])
+    refused = [_least_silent_share(responses[:needed - 1], kept, quadrature) for kept in range(needed - 1)]
+    taken = [_least_silent_share(responses, kept, quadrature) for kept in range(needed)]
+    print(f"{name}: one detector of {needed - 1} {max(refused):.1e}, of {needed} {min(taken):.2e} to {max(taken):.2e}")
+    # A source near linear polarisation comes nearer silencing two detectors: at eccentricity 0.5 or an
+    # inclination of 1, it leaves 9e-3 at the least.
+    assert max(refused) < 1e-9 and min(taken) > 1e-3, (name, refused, taken)
+    _, y = dataset([gf.HardExampleGenerator(make(**SKY), gf.OneDetector())],
+                   ifos=gf.Detectors(FIVE_DETECTORS.detectors[:needed]))[0]
+    power = np.sum(np.asarray(y["INJECTIONS"], np.float64)[:, 0] ** 2, axis=-1)
+    assert np.all(np.sum(power > 0.0, axis=-1) == 1)
+
+
+def test_one_detector_counts_detectors_of_one_response_once():
+    """
+    Detectors of one response are silenced together wherever they are, and co-located ones receive one signal from
+    every source: an example of fewer distinct detectors than its violation needs is refused by name as it is
+    projected. Two slots at one site with H1 hold a one-detector signal a source gives by silencing that site, and a
+    wrong delay of two independent noises that H1 and the site receive from a real source.
+    """
+    twins = gf.Detectors([gf.IFO.H1, gf.DetectorSlot.at(gf.Site.I1, gf.IFO.H1, "Ia"),
+                          gf.DetectorSlot.at(gf.Site.I1, gf.IFO.H1, "Ib")])
+    for make, violation in ((elliptical, gf.OneDetector()), (wnb, gf.WrongDelay(0.01))):
+        with pytest.raises(ValueError, match="needs 3 detectors present in every example, but an example of this "
+                                             "batch has 2"):
+            dataset([gf.HardExampleGenerator(make(), violation)], ifos=twins)[0]
+    # One plus polarisation needs two detectors for a wrong delay: H1 and the site.
+    dataset([gf.HardExampleGenerator(wnb(polarization_eccentricity=constant(1.0)), gf.WrongDelay(0.01))],
+            ifos=twins)[0]
+
+
+def test_a_precessing_binary_carries_two_independent_waveforms():
+    """
+    A binary whose spin can lie in its orbit's plane precesses: its cross polarisation is no quadrature of its plus,
+    so it carries two independent waveforms, and a wrong delay of it on two detectors, which receive any two, is
+    refused. Measured: the share of the cross polarisation's power outside the span of the plus and its quadrature.
+    """
+    def binary(approximant, spin):
+        return gf.CBCGenerator(mass_1_msun=30.0, mass_2_msun=8.0, inclination_radians=1.0, approximant=approximant,
+                               spin_1_in=spin, **SNR_SCALED)
+
+    def unfit_cross(generator):
+        waveforms, _ = generator.generate(1, 2048.0, 4.0, gf.SeedTree(2).batch("train", 0, 0).sub("wave/w"))
+        plus, cross = np.asarray(waveforms, np.float64)[0]
+        return _outside_span(cross[None], plus[None]) ** 2
+
+    aligned = binary(gf.Approximant.IMRPhenomD, (0.0, 0.0, 0.3))
+    precessing = binary(gf.Approximant.IMRPhenomPv2, (0.7, 0.0, 0.1))
+    assert (aligned.independent_waveforms, precessing.independent_waveforms) == (1, 2)
+    assert binary(gf.Approximant.IMRPhenomPv2, (0.0, 0.0, 0.3)).independent_waveforms == 1
+    assert precessing.linearly_polarisable and not aligned.linearly_polarisable
+    shares = unfit_cross(aligned), unfit_cross(precessing)
+    print(f"cross polarisation unfit by the plus and its quadrature: aligned {shares[0]:.1e}, precessing {shares[1]:.2f}")
+    assert shares[0] < 1e-2 < 1e-1 < shares[1]
+    with pytest.raises(ValueError, match="needs 3 detectors present"):
+        gf.HardExampleGenerator(binary(gf.Approximant.IMRPhenomPv2, (0.7, 0.0, 0.1)), gf.WrongDelay(0.01)).network = \
+            gf.Network([gf.IFO.H1, gf.IFO.L1])
+
+
+def test_a_generator_declares_whether_it_can_be_linearly_polarised():
+    """A binary edge-on and a burst of eccentricity 1 are linearly polarised; one never so is not."""
+    assert gf.CBCGenerator(inclination_radians=uniform(0.0, np.pi), **SNR_SCALED).linearly_polarisable
+    assert gf.CBCGenerator(inclination_radians=np.pi / 2.0, **SNR_SCALED).linearly_polarisable
+    assert not gf.CBCGenerator(inclination_radians=uniform(1.6, 3.0), **SNR_SCALED).linearly_polarisable
+    for make in (gf.SineGaussianGenerator, gf.ChirpletGenerator, gf.RingdownGenerator):
+        assert make(**SNR_SCALED).linearly_polarisable
+        assert make(polarization_eccentricity=uniform(0.5, 1.0), **SNR_SCALED).linearly_polarisable
+        assert not make(polarization_eccentricity=uniform(0.0, 0.9), **SNR_SCALED).linearly_polarisable
 
 
 def _direct(generator, outputs, window=1.0):
@@ -1023,7 +1173,7 @@ def test_what_cannot_label_or_hold_a_violation_is_refused_when_built():
 #: A hard example of each violation, from the generator it suits.
 STREAM_CASES = {
     "wrong delay": lambda: gf.HardExampleGenerator(wnb(), gf.WrongDelay(uniform(0.01, 0.02)), name="hard"),
-    "one detector": lambda: gf.HardExampleGenerator(wnb(), gf.OneDetector(), name="hard"),
+    "one detector": lambda: gf.HardExampleGenerator(elliptical(), gf.OneDetector(), name="hard"),
     "mismatched": lambda: gf.HardExampleGenerator(wnb(), gf.MismatchedWaveforms("noise", correlation=uniform(0.2, 0.6)),
                                                   name="hard"),
     "time reversed": lambda: gf.HardExampleGenerator(ringdown(), gf.TimeReversed(), name="hard"),

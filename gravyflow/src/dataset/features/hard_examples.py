@@ -1,6 +1,6 @@
 """
 Hard examples: signals that a detector network cannot receive from any
-astrophysical source, each matched to its generator's real signals but for one
+astrophysical source of their generator, each matched to its generator's real signals but for one
 violation of what a real signal is.
 
 A ``gf.HardExampleGenerator`` wraps a generator and one violation. It draws its
@@ -114,6 +114,17 @@ class Violation:
         there.
         """
         return generator.independent_waveforms + 1
+
+    def distinct_detectors(self, response, location, present : np.ndarray) -> np.ndarray:
+        """
+        How many of each example's present detectors (``present``, (Batch,
+        Detectors)) count towards ``fewest_detectors``, from their response
+        tensors (Detectors, 3, 3) or (Batch, Detectors, 3, 3) and locations
+        ((Batch,) Detectors, 3): (Batch,). By default co-located detectors of
+        one response, equal or opposite, count once, since every source gives
+        them one signal (up to its sign).
+        """
+        return _distinct(present, response, location)
 
     def check_scaling(self, scaling_method) -> None:
         """Refuse by name a scaling it cannot be given, when the hard example is built and as it is scaled."""
@@ -284,19 +295,35 @@ class OneDetector(Violation):
     than any real signal's would put it there would be a cue in one detector
     alone; the missing detectors' share is the violation itself.
 
-    A source that can be linearly polarised (a binary seen edge-on, a burst
-    of eccentricity 1, a white-noise burst whose polarisations fall in
-    proportion) leaves a detector silent at any sky, at the polarisation
-    angle where that detector's response vanishes, so one detector of two
-    holding the signal is a real signal: it needs three present
-    (``fewest_detectors``). Silencing two at once takes a sky where their
-    responses are parallel, which no example's own sky is but by chance.
+    The data says nothing of the source's sky or polarisation, so the
+    example is a real signal wherever any source of the generator, at any
+    sky, leaves every other present detector silent (``fewest_detectors``).
+    A source whose polarisations cannot be proportional (a binary never seen
+    edge-on, a burst of eccentricity below 1) is silent in a detector only
+    where both its responses vanish, that detector's nulls: two conditions on
+    the sky's two angles, met at isolated skies, so two detectors are silent
+    together only at a null they share, which detectors of different
+    responses have only by a coincidence of their geometry. It needs three
+    present. A source that can be linearly polarised (the generator's
+    ``linearly_polarisable``: a binary whose inclination can be pi / 2, a
+    burst of eccentricity 1, a periodic wave, a white-noise burst) is silent
+    in a detector at one condition on its sky and polarisation angle, three
+    angles: two detectors are silenced together along a curve of skies,
+    three at isolated skies, and four only by such a coincidence. It needs
+    five. Detectors of one
+    response, equal or opposite, wherever they are, are silent together, so
+    they count once (``distinct_detectors``): an example with fewer is
+    refused by name as it is projected.
     """
     code : ClassVar[ViolationCode] = ViolationCode.ONE_DETECTOR
 
     def fewest_detectors(self, generator):
-        """Three, and more where the generator's waveforms ask it: one silent detector of two is a real signal."""
-        return max(super().fewest_detectors(generator), 3)
+        """Five where the generator can be linearly polarised, three where it cannot (see the class)."""
+        return 5 if generator.linearly_polarisable else 3
+
+    def distinct_detectors(self, response, location, present):
+        """Detectors of one response, equal or opposite, count once wherever they are: one source silences them together."""
+        return _distinct(present, response)
 
     def projection(self, hard_example, network, time_delays, present, stream, num_examples,
                    offsets_seconds, extent_seconds, window_seconds):
@@ -488,6 +515,10 @@ class MismatchedWaveforms(Violation):
         common[SIGNAL_EXTENT] = extents[0]
         return waveforms, common
 
+    def distinct_detectors(self, response, location, present):
+        """Every present detector: each holds a waveform of its own, which detectors alike only make plainer."""
+        return np.sum(np.asarray(present) > 0, axis=-1)
+
     def detector_balance(self, polarisations, background, sample_rate_hertz, onsource_duration_seconds):
         """
         Detector j's waveform rescaled so that its noise-weighted polarisation
@@ -595,6 +626,33 @@ def _extent(generator : WaveformGenerator, parameters, num_waveforms : int):
                  for side in generator.get_signal_extent_seconds(parameters))
 
 
+#: How far apart two detectors' response tensors (entries of order 1/2, held
+#: in float32 by a fixed network) and locations (metres) may be and still be
+#: one: a detector given twice, or slots at one site, are equal to the bit.
+_SAME_RESPONSE, _SAME_LOCATION_METERS = 1.0e-6, 1.0
+
+
+def _distinct(present, response, location=None) -> np.ndarray:
+    """
+    Each example's number of present detectors (``present``, (Batch,
+    Detectors)) that differ from every other in their response tensor, up to
+    its sign, or, given ``location``, in their response or their location:
+    (Batch,).
+    """
+    present = np.asarray(present) > 0
+    num_examples, num_detectors = present.shape
+    response = np.broadcast_to(np.asarray(response, dtype=np.float64), (num_examples, num_detectors, 3, 3))
+    pairs = response[:, :, None] - response[:, None], response[:, :, None] + response[:, None]
+    same = np.min([np.max(np.abs(pair), axis=(-2, -1)) for pair in pairs], axis=0) <= _SAME_RESPONSE
+    if location is not None:
+        location = np.broadcast_to(np.asarray(location, dtype=np.float64), (num_examples, num_detectors, 3))
+        same &= np.max(np.abs(location[:, :, None] - location[:, None]), axis=-1) <= _SAME_LOCATION_METERS
+    # A detector counts unless one present before it is the same.
+    earlier = np.tril(np.ones((num_detectors, num_detectors), dtype=bool), -1)
+    repeated = np.any(same & earlier & present[:, None, :], axis=-1)
+    return np.sum(present & ~repeated, axis=-1)
+
+
 def _num_detectors(network) -> int:
     return int(np.asarray(network.num_detectors).ravel()[0])
 
@@ -640,9 +698,12 @@ class HardExampleGenerator(WaveformGenerator):
     in every case. Every example needs the detectors present that the
     violation asks of the generator (``Violation.fewest_detectors``: one
     more than the independent waveforms the generator's polarisations carry
-    for a wrong delay or a mismatch, three for one detector, one for a
-    reversal): a network or a num_present that can give fewer is refused by
-    name when the dataset is built. TimeReversed takes only a generator
+    for a wrong delay or a mismatch, three or five for one detector, one for
+    a reversal), counted as the violation counts them
+    (``Violation.distinct_detectors``: detectors that receive one signal
+    alike may count once): a network or a num_present that can
+    give fewer is refused by name when it is set, and an example with fewer
+    as it is projected. TimeReversed takes only a generator
     whose reversal leaves its family (gf.TimeReversed).
 
     ``ReturnVariables.VIOLATION`` gives each example's ``violation.code``.
@@ -691,25 +752,31 @@ class HardExampleGenerator(WaveformGenerator):
         # Checked on every assignment, a dataset's binding included.
         network = self.init_network(network, self.geometry_stream())
         if network is not None:
-            fewest, needed = self._fewest_present(network), self.violation.fewest_detectors(self.generator)
-            if fewest < needed:
-                raise ValueError(
-                    f"A {type(self.violation).__name__} hard example of a {type(self.generator).__name__} needs "
-                    f"{needed} detectors present in every example, but its network can have {fewest}: there its "
-                    f"signal is one a real source gives (the generator's polarisations carry "
-                    f"{self.generator.independent_waveforms} independent waveforms; see "
-                    f"gf.{type(self.violation).__name__}). Give it more detectors, or a num_present of at least "
-                    f"{needed}."
-                )
+            self._check_detectors(self._fewest_present(network), "its network can have")
         self._network = network
 
-    @staticmethod
-    def _fewest_present(network) -> int:
+    def _check_detectors(self, fewest : int, where : str) -> None:
+        """Refuse by name ``fewest`` detectors present, counted by the violation, where it needs more."""
+        needed = self.violation.fewest_detectors(self.generator)
+        if fewest < needed:
+            raise ValueError(
+                f"A {type(self.violation).__name__} hard example of a {type(self.generator).__name__} needs "
+                f"{needed} detectors present in every example, but {where} {fewest} (counted as "
+                f"gf.{type(self.violation).__name__} counts them: detectors that receive one signal alike may count "
+                f"once): there its signal is one a real source gives (the generator's "
+                f"polarisations carry {self.generator.independent_waveforms} independent waveforms and "
+                f"{'can' if self.generator.linearly_polarisable else 'cannot'} be linearly polarised; see "
+                f"gf.{type(self.violation).__name__}). Give it more detectors, or a num_present of at least {needed}."
+            )
+
+    def _fewest_present(self, network) -> int:
+        """The fewest detectors an example of ``network`` can present, counted by the violation where its geometry is fixed."""
         if isinstance(network, gf.Detectors):
             if network.num_present is None:
                 return network.num_detectors
             return int(np.ceil(get_support_bounds(network.num_present, "num_present")[0]))
-        return _num_detectors(network)
+        present = np.ones((1, _num_detectors(network)))
+        return int(self.violation.distinct_detectors(network.response, network.location, present)[0])
 
     def get_max_generated_duration(self):
         return self.generator.get_max_generated_duration()
@@ -828,6 +895,10 @@ class HardExampleGenerator(WaveformGenerator):
         num_detectors = int(ops.shape(time_delays)[-1])
         present = np.asarray(network.present, dtype=np.float64) if isinstance(network, ExampleNetworks) \
             else np.ones((num_examples, num_detectors))
+        # A network drawn per example is counted here, its geometry known.
+        self._check_detectors(
+            int(np.min(self.violation.distinct_detectors(network.response, network.location, present))),
+            "an example of this batch has")
 
         def stream(name):
             return streams.stream(f"inject/{label}/violation/{name}")

@@ -469,6 +469,18 @@ class WaveformGenerator:
         """
         return 2
 
+    @property
+    def linearly_polarisable(self) -> bool:
+        """
+        Whether its polarisations can be proportional, a linearly polarised
+        source's, which one condition on the sky and the polarisation angle
+        silences in a detector (gf.OneDetector). Declared by each generator:
+        True, the safe answer, where it declares none, and so for a periodic
+        wave (plus only) and a white-noise burst (plus only, or two
+        independent noises, among whose pairs are proportional ones).
+        """
+        return True
+
     def __post_init__(self):
         if self.name is not None:
             check_name(self.name, "generator name")
@@ -1164,17 +1176,47 @@ class CBCGenerator(WaveformGenerator):
 
     # A binary's distance, inclination, orbital phase and ascending node change
     # only the amplitude and the phase each detector receives its chirp with
-    # (exactly for the dominant mode alone; this holds them so for every
-    # approximant), which other skies and polarisations give too.
+    # (exactly for an aligned-spin binary's dominant mode), which other skies
+    # and polarisations give too. A precessing binary's inclination changes its
+    # shape as well: left out, a mismatch in it alone is refused, the safe way.
     shape_attributes : ClassVar[Tuple[str, ...]] = ("mass_1_msun", "mass_2_msun", "spin_1_in", "spin_2_in")
 
     # A binary's frequency rises into its merger; reversed, it falls from it.
     time_reversal_leaves_family : ClassVar[bool] = True
 
-    # Its dominant mode's cross polarisation is its plus a quarter cycle on,
-    # rescaled by the inclination (this holds it so for every approximant, as
-    # its shape_attributes do).
-    independent_waveforms : ClassVar[int] = 1
+    @property
+    def independent_waveforms(self) -> int:
+        """
+        1 where its spins lie along the orbit's axis: its dominant mode's cross
+        polarisation is its plus a quarter cycle on, rescaled by the
+        inclination. 2 where it precesses (``precesses``): its orbit's axis
+        turns, so its cross polarisation is no quadrature of its plus.
+        """
+        return 2 if self.precesses else 1
+
+    @property
+    def linearly_polarisable(self) -> bool:
+        """
+        Where its inclination can be pi / 2 (or another odd multiple of it):
+        seen edge-on, its cross polarisation vanishes. And where it precesses,
+        whose polarisations nothing here holds apart.
+        """
+        if self.precesses:
+            return True
+        low, high = get_support_bounds(self.inclination_radians, "inclination_radians")
+        return bool(np.floor(high / np.pi - 0.5) >= np.ceil(low / np.pi - 0.5))
+
+    @property
+    def precesses(self) -> bool:
+        """Whether a spin can have an in-plane (x, y) component, which only a precessing approximant takes."""
+        return any(bound != (0.0, 0.0) for attribute in ("spin_1_in", "spin_2_in")
+                   for bound in self._spin_bounds(attribute)[:2])
+
+    def _spin_bounds(self, attribute : str):
+        """Each component's (low, high) support of a spin; a spin given as one distribution is its aligned component."""
+        value = getattr(self, attribute)
+        components = (0.0, 0.0, value) if isinstance(value, gf.Distribution) else tuple(value)
+        return [get_support_bounds(component, f"{attribute}[{index}]") for index, component in enumerate(components)]
 
     distributed_attributes : Tuple[str] = (
         "mass_1_msun",
@@ -1316,15 +1358,7 @@ class CBCGenerator(WaveformGenerator):
                     )
 
         for attribute in ("spin_1_in", "spin_2_in"):
-            value = getattr(self, attribute)
-            if isinstance(value, gf.Distribution):
-                components = (0.0, 0.0, value)
-            else:
-                components = tuple(value)
-            bounds = [
-                get_support_bounds(component, f"{attribute}[{index}]")
-                for index, component in enumerate(components)
-            ]
+            bounds = self._spin_bounds(attribute)
             if approximant not in self.PRECESSING_APPROXIMANTS and \
                     any(bound != (0.0, 0.0) for bound in bounds[:2]):
                 raise ValueError(

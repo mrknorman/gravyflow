@@ -160,7 +160,12 @@ repository before it may need the changes below.
 - **Hard examples: one detector.** `gf.OneDetector()` puts the signal in exactly one present detector. It is scaled
   as the real signal is, to its target over every present detector, and only then are the other detectors' copies
   emptied, so the one detector holds what the real signal gives it, a real detector's loudness, and the network SNR,
-  which the SNR label measures, is that detector's alone.
+  which the SNR label measures, is that detector's alone. Its data says nothing of the source's sky or polarisation,
+  so it needs the detectors present that no source of its generator silences together at any sky: three where the
+  source's polarisations cannot be proportional (silent only at a detector's nulls), five where it can be linearly
+  polarised (each generator's `linearly_polarisable`: a binary whose inclination can be pi/2, a burst of
+  eccentricity 1, a periodic wave, a white-noise burst), which the sky and the polarisation angle silence in three
+  detectors at once.
 
 - **Hard examples: mismatched waveforms.** `gf.MismatchedWaveforms(differ, correlation=None)` gives each detector a
   waveform of its own, differing in the named draws with every other draw shared. A named draw is a parameter or a
@@ -186,14 +191,17 @@ repository before it may need the changes below.
   waveforms.
 
 - **Hard examples: the networks that can hold one.** Each generator declares the independent waveforms its
-  polarisations carry (`independent_waveforms`: 1 for a binary, sine-Gaussian, chirplet, ringdown or periodic wave;
-  2 for a white-noise burst unless its eccentricity is 1 alone), since that many detectors receive any waveforms in
-  them. So a wrong delay or a mismatch needs one more detector present, one detector three (a linearly polarised
-  source silences one detector at any sky), a reversal one (`Violation.fewest_detectors`), and a network or
-  `num_present` that can present fewer is refused by name when the dataset is built. So are a hard example as a
-  component of a `gf.IncoherentGenerator`, which would drop its violation, and `VIOLATION` with an
-  `IncoherentGenerator`, whose detectors' waveforms differ though it names no violation (a labelled mismatch is
-  `gf.MismatchedWaveforms`), wherever the label is made.
+  polarisations carry (`independent_waveforms`: 1 for an aligned-spin binary, sine-Gaussian, chirplet, ringdown or
+  periodic wave; 2 for a binary that can precess, whose cross polarisation is no quadrature of its plus, and a
+  white-noise burst unless its eccentricity is 1 alone), since that many detectors receive any waveforms in them.
+  So a wrong delay or a mismatch needs one more detector present, one detector three or five, a reversal one
+  (`Violation.fewest_detectors`), counted as the violation counts them (`Violation.distinct_detectors`: co-located
+  detectors of one response once for a wrong delay, any of one response once for one detector, and every detector
+  for a mismatch, whose own waveforms detectors alike only make plainer),
+  and a network or `num_present` that can present fewer is refused by name when it is set, an example with fewer as
+  it is projected. So are a hard example as a component of a `gf.IncoherentGenerator`, which would drop its
+  violation, and `VIOLATION` with an `IncoherentGenerator`, whose detectors' waveforms differ though it names no
+  violation (a labelled mismatch is `gf.MismatchedWaveforms`), wherever the label is made.
 
 - **Hard examples: labels and streams.** `ReturnVariables.VIOLATION` (B, G) gives each generator's
   `gf.ViolationCode` (NONE, 0, for a real signal), float32, NaN where the generator injected nothing (its
@@ -205,14 +213,19 @@ repository before it may need the changes below.
 
 - **Hard examples: measured.** A wrong delay's other pairs: for margins of 2 to 20 ms on networks of two to four
   detectors drawn on the sphere, the shifted copy exceeds the largest margin on another pair in about a quarter of
-  examples. A wrong delay's copies near their range's edges are denser than real arrivals: for a 0.1 s burst in a
-  1 s window on H1, L1 and V1, with margins of 2 to 10 ms, 0.8 to 1.0 % of copies lie within 10 ms of the range's
-  edges, against 0.27 % of real arrivals. Each violation, fitted by free waveforms at its network's delays (the
-  unfit share of its power), is a real signal on the networks refused, leaving at most 2e-15, and none on those
-  taken: wrong delays leave 2e-3 to 0.36 at the best sky, one silent detector 0.34 to 0.60 at its own sky, and
-  mismatches 3e-4 to 0.36, against at most 4e-3 for each generator's real signal at its sky (a ringdown's sudden
-  start), 1e-4 for a binary's and 1e-8 for a burst's. A mismatch is as far from a real signal as its detectors' draws
-  differ: a binary's masses drawn 0.2 % of their range apart leave 3e-5.
+  examples. A wrong delay's copies near their range's edges are denser than real arrivals: for a 0.1 s burst in a 1 s
+  window on H1, L1 and V1, with margins of 2 to 10 ms, 0.8 to 1.0 % of copies lie within 10 ms of the range's edges,
+  against 0.27 % of real arrivals. Each violation, fitted by free waveforms at its network's delays (the unfit share
+  of its power), is a real signal on the networks refused, leaving at most 2e-15, and none on those taken: wrong
+  delays leave 2e-3 to 0.36 at the best sky, and mismatches 3e-4 to 0.36, against at most 4e-3 for each generator's
+  real signal at its sky (a ringdown's sudden start), 1e-4 for a binary's and 1e-8 for a burst's. A mismatch is as far
+  from a real signal as its detectors' draws differ: a binary's masses drawn 0.2 % of their range apart leave 3e-5.
+  One detector's signal, fitted by the best source at any sky and polarisation angle, which must silence the others: a
+  linearly polarised source silences any three of H1, L1, V1 and K1 together (leaving below 1e-15), none of four with
+  I1 beside them (at least 1.6e-2); one that cannot be silences one of two detectors at its nulls (0) and none of H1,
+  L1 and V1 two at once (at least 8.6e-3 for an eccentricity of 0.5 or an inclination of 1, less nearer linear). A
+  precessing binary (IMRPhenomPv2, a 30 and 8 solar-mass pair with an in-plane spin of 0.7) leaves 0.26 of its cross
+  polarisation's power outside the span of its plus and the plus's quadrature, against 1.2e-3 for IMRPhenomD.
 
 - **Sites for test networks: LIGO-India, KAGRA and the Einstein Telescope.** `gf.Site` bundles the sites of I1, K1
   and the Einstein Telescope's triangle E1, E2 and E3: each vertex's latitude, longitude and elevation and each arm's

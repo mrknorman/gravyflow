@@ -178,9 +178,12 @@ white-noise burst's noise), and balanced to one source's loudness; and `gf.TimeR
 waveform reversed in time, only for a binary or a ringdown, whose reversal is a waveform no source of their kind
 makes. `ReturnVariables.VIOLATION` (B, G) labels each generator's `gf.ViolationCode` (NONE, 0, for a real signal),
 NaN where the generator injected nothing. A network of no more detectors than the independent waveforms a generator's
-polarisations carry (`independent_waveforms`: one for a binary, two for a white-noise burst of independent
-polarisations) receives any waveforms in them, so a wrong delay or a mismatch needs one more detector present, and
-one detector three; a network that can present fewer is refused by name.
+polarisations carry (`independent_waveforms`: one for an aligned-spin binary, two for a precessing one or a
+white-noise burst of independent polarisations) receives any waveforms in them, so a wrong delay or a mismatch needs
+one more detector present. One detector needs the detectors no source silences together at any sky: three, or five
+where the generator can be linearly polarised (`linearly_polarisable`: a binary whose inclination can be pi/2, a
+burst of eccentricity 1). A network that can present fewer is refused by name, detectors that receive one signal
+alike counted once where a real source could then give it.
 
 ```python
 binary = gf.CBCGenerator(mass_1_msun=uniform(15.0, 80.0), mass_2_msun=uniform(15.0, 80.0),
