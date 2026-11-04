@@ -107,8 +107,13 @@ class Violation:
             )
         return super().__new__(cls)
 
-    def check(self, generator : WaveformGenerator) -> None:
-        """Refuse by name a generator whose signals it cannot violate, wherever the hard example is used."""
+    def check(self, hard_example : "HardExampleGenerator") -> None:
+        """
+        Refuse by name a hard example it cannot be given, wherever the hard
+        example is used: one whose generator's signals it cannot violate, or
+        whose own settings (its scaling, its placement: those the injection
+        layer reads) it cannot hold.
+        """
 
     def fewest_detectors(self, generator : WaveformGenerator) -> int:
         """
@@ -123,9 +128,6 @@ class Violation:
         signal there.
         """
         return generator.independent_waveforms + 1
-
-    def check_scaling(self, scaling_method) -> None:
-        """Refuse by name a scaling it cannot be given, wherever the hard example is used."""
 
     def reach_seconds(self, network) -> float:
         """
@@ -360,7 +362,14 @@ class MismatchedWaveforms(Violation):
                 )
             object.__setattr__(self, "correlation", correlation)
 
-    def check(self, generator):
+    def check(self, hard_example):
+        """
+        Refuse by name a mismatch of draws its generator does not make, or
+        that leave the shape alone, take one value or move the extent, a
+        correlation of differing parameters, and a scaling other than a
+        network SNR (see the class).
+        """
+        generator = hard_example.generator
         parameters = tuple(generator.distributed_attributes or ())
         # A content draw is a shape draw that is no parameter: a burst's noise.
         content = [draw for draw in generator.shape_attributes if draw not in parameters]
@@ -406,10 +415,8 @@ class MismatchedWaveforms(Violation):
                 "come as near the window's edge as a real signal of its length does. Differ in a shape draw that "
                 f"leaves the extent alone ({', '.join(free) or 'it has none'})."
             )
-
-    def check_scaling(self, scaling_method):
-        """A network SNR only: its detectors' waveforms have no one hrss, hpeak or distance."""
-        type_ = getattr(scaling_method, "type_", None)
+        # A network SNR only: its detectors' waveforms have no one hrss, hpeak or distance.
+        type_ = getattr(hard_example.scaling_method, "type_", None)
         if type_ is not None and type_ is not gf.ScalingTypes.SNR:
             raise ValueError(
                 f"A MismatchedWaveforms hard example is scaled to a network SNR, not {type_}: each detector's waveform "
@@ -510,7 +517,8 @@ class TimeReversed(Violation):
         """One: the reversed waveform is no real signal of its generator in any detector."""
         return 1
 
-    def check(self, generator):
+    def check(self, hard_example):
+        generator = hard_example.generator
         if not generator.time_reversal_leaves_family:
             raise ValueError(
                 f"TimeReversed takes a generator whose waveform reversed in time leaves its family "
@@ -752,15 +760,14 @@ class HardExampleGenerator(WaveformGenerator):
         """
         Refuse by name what cannot hold its violation, wherever it is used:
         as its network is set (when it is built, and as a dataset binds it)
-        and as each batch is projected (``draw_projection``). The generator
-        and the scaling (``Violation.check`` and ``check_scaling``), since the
-        generator is the caller's own object and either may change after the
-        hard example is built; and the independent detectors an example can
+        and as each batch is projected (``draw_projection``). Its generator
+        and its own settings (``Violation.check``), since the generator is the
+        caller's own object and either may change after the hard example is
+        built; and the independent detectors an example can
         present (``Violation.fewest_detectors``): ``network``'s fewest, or
         where ``present`` (Batch, Detectors) is given, each example's own.
         """
-        self.violation.check(self.generator)
-        self.violation.check_scaling(self.scaling_method)
+        self.violation.check(self)
         if network is None:
             return
         if present is None:
