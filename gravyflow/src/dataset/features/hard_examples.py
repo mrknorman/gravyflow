@@ -57,7 +57,11 @@ MIN_MARGIN_SECONDS = 1.0e-6
 
 
 class ViolationCode(IntEnum):
-    """What each example's signal is, as ``ReturnVariables.VIOLATION`` labels it."""
+    """
+    What each example's signal is, as ``ReturnVariables.VIOLATION`` labels
+    it: how it was built, not whether its violation shows above the noise
+    (see gf.WrongDelay).
+    """
     NONE = 0
     WRONG_DELAY = 1
     MISMATCHED_WAVEFORMS = 2
@@ -216,6 +220,15 @@ class WrongDelay(Violation):
     a lower bound on the largest violation an example shows, and a margin
     drawn smaller (a harder example, as a curriculum would draw it) sets that
     bound, not the violation every pair sees.
+
+    The label (gf.ViolationCode.WRONG_DELAY) marks the construction, not its
+    detectability. What a wrong delay leaves that no real source gives is
+    the part of the detectors' strain that no source's polarisations, at any
+    sky, fit, and in noise that part can be smaller than the noise: for a
+    generator whose polarisations carry two waveforms (a white-noise burst)
+    on three detectors, a wrong delay at a network SNR of 12 can leave less
+    than an SNR of 1 of it. A label of what a model can detect needs a margin
+    of its own, measured on the examples.
 
     The example is placed as the generator's signals are, exactly, and the
     copy's reference time is kept where a real signal's reference time

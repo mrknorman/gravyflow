@@ -284,7 +284,10 @@ class SineGaussianGenerator(gf.WaveformGenerator):
     def independent_waveforms(self) -> int:
         """
         1: its cross polarisation is its plus a quarter cycle on (envelope x
-        sin beside envelope x cos), rescaled by the eccentricity.
+        sin beside envelope x cos), rescaled by the eccentricity. That holds
+        approximately: closely where its quality factor is a few or more, so
+        that its envelope's spectrum lies almost wholly below its frequency,
+        and loosely for a quality factor near 1.
         """
         return 1
 
@@ -414,7 +417,9 @@ class ChirpletGenerator(gf.WaveformGenerator):
     def independent_waveforms(self) -> int:
         """
         1: its cross polarisation is its plus a quarter cycle on (envelope x
-        sin beside envelope x cos), rescaled by the eccentricity.
+        sin beside envelope x cos), rescaled by the eccentricity. That holds
+        approximately: closely where its envelope and its frequency change
+        little over one cycle, loosely for a short chirplet of a fast sweep.
         """
         return 1
 
@@ -549,7 +554,8 @@ class RingdownGenerator(gf.WaveformGenerator):
     def independent_waveforms(self) -> int:
         """
         1: its cross polarisation is its plus a quarter cycle on (envelope x
-        sin beside envelope x cos), rescaled by the eccentricity.
+        sin beside envelope x cos), rescaled by the eccentricity. That holds
+        approximately: closely over its decay, loosely at its sudden start.
         """
         return 1
 

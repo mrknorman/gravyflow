@@ -483,8 +483,9 @@ class WaveformGenerator:
     def independent_waveforms(self) -> int:
         """
         How many independent waveforms its polarisations carry: 1 where the
-        cross polarisation is the plus a quarter cycle on, rescaled, or none;
-        2 where they are drawn apart. Each detector receives a combination of
+        cross polarisation is the plus a quarter cycle on, rescaled (for a
+        wave whose envelope and frequency change slowly over a cycle, to that
+        approximation), or none; 2 where they are drawn apart. Each detector receives a combination of
         the polarisations, delayed, so that many detectors of independent
         responses receive any waveforms in them, and only a network of more
         independent responses can show a signal no source of this generator
@@ -1202,7 +1203,8 @@ class CBCGenerator(WaveformGenerator):
         """
         1 where its spins lie along the orbit's axis: its dominant mode's cross
         polarisation is its plus a quarter cycle on, rescaled by the
-        inclination. 2 where it precesses (``precesses``): its orbit's axis
+        inclination (closely, but for its taper and its frequency's change
+        over a cycle near its merger). 2 where it precesses (``precesses``): its orbit's axis
         turns, so its cross polarisation is no quadrature of its plus.
         """
         return 2 if self.precesses else 1
