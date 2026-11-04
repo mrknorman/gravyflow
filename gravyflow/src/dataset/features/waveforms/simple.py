@@ -115,11 +115,6 @@ def _check_eccentricity(generator):
         )
 
 
-def _eccentricity_reaches_linear(generator) -> bool:
-    """Whether its polarisation eccentricity can be 1, LAL's linear: its cross polarisation then vanishes."""
-    return _finite_bounds(generator, "polarization_eccentricity")[1] >= 1.0
-
-
 def _check_below_nyquist(generator, names, sample_rate_hertz):
     nyquist = sample_rate_hertz / 2.0
     for name in names:
@@ -287,9 +282,6 @@ class SineGaussianGenerator(gf.WaveformGenerator):
     # beside envelope x cos), rescaled by the eccentricity.
     independent_waveforms: ClassVar[int] = 1
 
-    # Linearly polarised where its eccentricity can be 1.
-    linearly_polarisable = property(_eccentricity_reaches_linear)
-
     distributed_attributes: Tuple[str] = (
         "frequency_hertz",
         "quality_factor",
@@ -416,9 +408,6 @@ class ChirpletGenerator(gf.WaveformGenerator):
     # beside envelope x cos), rescaled by the eccentricity.
     independent_waveforms: ClassVar[int] = 1
 
-    # Linearly polarised where its eccentricity can be 1.
-    linearly_polarisable = property(_eccentricity_reaches_linear)
-
     distributed_attributes: Tuple[str] = (
         "start_frequency_hertz",
         "end_frequency_hertz",
@@ -538,9 +527,6 @@ class RingdownGenerator(gf.WaveformGenerator):
     # Its cross polarisation is its plus a quarter cycle on (envelope x sin
     # beside envelope x cos), rescaled by the eccentricity.
     independent_waveforms: ClassVar[int] = 1
-
-    # Linearly polarised where its eccentricity can be 1.
-    linearly_polarisable = property(_eccentricity_reaches_linear)
 
     # A ringdown starts at its peak and decays (its damping time is
     # positive); reversed, it rises into its peak and stops there.

@@ -135,7 +135,6 @@ _MODULES = {
     "IncoherentGenerator": "gravyflow.src.dataset.features.injection",
     "HardExampleGenerator": "gravyflow.src.dataset.features.hard_examples",
     "WrongDelay": "gravyflow.src.dataset.features.hard_examples",
-    "OneDetector": "gravyflow.src.dataset.features.hard_examples",
     "MismatchedWaveforms": "gravyflow.src.dataset.features.hard_examples",
     "TimeReversed": "gravyflow.src.dataset.features.hard_examples",
     "ViolationCode": "gravyflow.src.dataset.features.hard_examples",

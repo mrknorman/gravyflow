@@ -13,8 +13,6 @@ differs from a real one in its violation alone:
   from another present detector is that pair's light-travel time plus a margin,
   in the direction that keeps it where the generator's signals arrive where
   only one does;
-- ``gf.OneDetector``: the signal is in exactly one present detector, which holds
-  what the real signal gives it there;
 - ``gf.MismatchedWaveforms``: each detector has a waveform of its own, its
   differing draws its own and the rest shared;
 - ``gf.TimeReversed``: the waveform runs backwards in time, for a generator
@@ -58,9 +56,8 @@ class ViolationCode(IntEnum):
     """What each example's signal is, as ``ReturnVariables.VIOLATION`` labels it."""
     NONE = 0
     WRONG_DELAY = 1
-    ONE_DETECTOR = 2
-    MISMATCHED_WAVEFORMS = 3
-    TIME_REVERSED = 4
+    MISMATCHED_WAVEFORMS = 2
+    TIME_REVERSED = 3
 
 
 def _distribution(value, name : str) -> "gf.Distribution":
@@ -156,12 +153,11 @@ class Violation:
     def projection(self, hard_example, network, time_delays, present : np.ndarray, stream, num_examples : int,
                    offsets_seconds, extent_seconds, window_seconds : Optional[float]):
         """
-        Its change to the projection, (shifts, kept), each (Batch, Detectors)
-        or None (see HardExampleGenerator.draw_projection), from the
-        violation's streams (``stream(name)``): none, no shift and every
-        detector kept.
+        Its change to the projection: each detector's shift, (Batch,
+        Detectors) seconds, or None (see HardExampleGenerator.draw_projection),
+        from the violation's streams (``stream(name)``): None, no shift.
         """
-        return None, None
+        return None
 
 
 @dataclass(frozen=True)
@@ -249,7 +245,7 @@ class WrongDelay(Violation):
         shifts = np.zeros((num_examples, num_detectors))
         # The copy's delay from its partner becomes sign x (light travel + margin).
         shifts[rows, detector] = sign * reach - (delays[rows, detector] - delays[rows, partner])
-        return shifts, None
+        return shifts
 
     @staticmethod
     def _direction(hard_example, drawn, arrival, reach, extent_seconds, window_seconds : float):
@@ -277,60 +273,6 @@ class WrongDelay(Violation):
             return np.maximum(low - copy, 0.0) + np.maximum(copy - high, 0.0)
 
         return np.where(outside(drawn) <= outside(-drawn), drawn, -drawn)
-
-
-@dataclass(frozen=True)
-class OneDetector(Violation):
-    """
-    The signal in exactly one present detector (uniform among the example's
-    present detectors, from ``inject/{g}/violation/detector``). The others
-    receive no signal: their DETECTOR_SNR is 0 and their CENTRAL_TIME NaN.
-
-    It is scaled as the real signal is, to the generator's target over every
-    present detector (a network SNR, an hrss, an hpeak or a distance), and
-    only then are the other detectors' copies emptied: the one detector holds
-    exactly what the real signal gives it, so its loudness is a real
-    detector's, and the network SNR is what is left, that detector's alone,
-    below the target (the SNR label gives it, measured). A detector louder
-    than any real signal's would put it there would be a cue in one detector
-    alone; the missing detectors' share is the violation itself.
-
-    The data says nothing of the source's sky or polarisation, so the
-    example is a real signal wherever any source of the generator, at any
-    sky, leaves every other present detector silent (``fewest_detectors``).
-    A source whose polarisations cannot be proportional (a binary never seen
-    edge-on, a burst of eccentricity below 1) is silent in a detector only
-    where both its responses vanish, that detector's nulls: two conditions on
-    the sky's two angles, met at isolated skies, so two detectors are silent
-    together only at a null they share, which detectors of different
-    responses have only by a coincidence of their geometry. It needs three
-    present. A source that can be linearly polarised (the generator's
-    ``linearly_polarisable``: a binary whose inclination can be pi / 2, a
-    burst of eccentricity 1, a periodic wave, a white-noise burst) is silent
-    in a detector at one condition on its sky and polarisation angle, three
-    angles: two detectors are silenced together along a curve of skies,
-    three at isolated skies, and four only by such a coincidence. It needs
-    five. Detectors of one
-    response, equal or opposite, wherever they are, are silent together, so
-    they count once (``distinct_detectors``): an example with fewer is
-    refused by name as it is projected.
-    """
-    code : ClassVar[ViolationCode] = ViolationCode.ONE_DETECTOR
-
-    def fewest_detectors(self, generator):
-        """Five where the generator can be linearly polarised, three where it cannot (see the class)."""
-        return 5 if generator.linearly_polarisable else 3
-
-    def distinct_detectors(self, response, location, present):
-        """Detectors of one response, equal or opposite, count once wherever they are: one source silences them together."""
-        return _distinct(present, response)
-
-    def projection(self, hard_example, network, time_delays, present, stream, num_examples,
-                   offsets_seconds, extent_seconds, window_seconds):
-        """Every detector's copy emptied but one."""
-        kept = np.zeros(present.shape, dtype=np.float32)
-        kept[np.arange(num_examples), _choose(present, stream("detector"))] = 1.0
-        return None, kept
 
 
 @dataclass(frozen=True)
@@ -678,7 +620,7 @@ def _choose(candidates : np.ndarray, rng : np.random.Generator) -> np.ndarray:
 class HardExampleGenerator(WaveformGenerator):
     """
     ``generator``'s signals, each with one ``violation`` (gf.WrongDelay,
-    gf.OneDetector, gf.MismatchedWaveforms or gf.TimeReversed): matched to the
+    gf.MismatchedWaveforms or gf.TimeReversed): matched to the
     generator's real signals in everything else.
 
     It draws as the generator does, from its distributions, but under its own
@@ -698,8 +640,7 @@ class HardExampleGenerator(WaveformGenerator):
     in every case. Every example needs the detectors present that the
     violation asks of the generator (``Violation.fewest_detectors``: one
     more than the independent waveforms the generator's polarisations carry
-    for a wrong delay or a mismatch, three or five for one detector, one for
-    a reversal), counted as the violation counts them
+    for a wrong delay or a mismatch, one for a reversal), counted as the violation counts them
     (``Violation.distinct_detectors``: detectors that receive one signal
     alike may count once): a network or a num_present that can
     give fewer is refused by name when it is set, and an example with fewer
@@ -764,8 +705,7 @@ class HardExampleGenerator(WaveformGenerator):
                 f"{needed} detectors present in every example, but {where} {fewest} (counted as "
                 f"gf.{type(self.violation).__name__} counts them: detectors that receive one signal alike may count "
                 f"once): there its signal is one a real source gives (the generator's "
-                f"polarisations carry {self.generator.independent_waveforms} independent waveforms and "
-                f"{'can' if self.generator.linearly_polarisable else 'cannot'} be linearly polarised; see "
+                f"polarisations carry {self.generator.independent_waveforms} independent waveforms; see "
                 f"gf.{type(self.violation).__name__}). Give it more detectors, or a num_present of at least {needed}."
             )
 
@@ -878,11 +818,10 @@ class HardExampleGenerator(WaveformGenerator):
     ):
         """
         The violation's change to the projection, from the generator's
-        ``inject/{label}/violation/...`` streams: (shifts, kept), each
-        (Batch, Detectors). ``shifts`` (seconds, or None) is the time each
-        detector's copy is moved by, beyond its own delay (``time_delays``,
-        the projection's, (Batch, Detectors)); ``kept`` (or None) is 1 in the
-        detectors that keep the signal and 0 in the others.
+        ``inject/{label}/violation/...`` streams: each detector's shift,
+        (Batch, Detectors) seconds, or None, the time its copy is moved by
+        beyond its own delay (``time_delays``, the projection's, (Batch,
+        Detectors)).
 
         A wrong delay keeps its copy in the window (``window_seconds`` long)
         by its direction, from each example's placement, ``offsets_seconds``

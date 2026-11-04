@@ -171,8 +171,7 @@ print(inputs["DETECTOR_GEOMETRY"].shape, inputs["DETECTOR_MASK"].shape)  # (32, 
 network can receive from a real source, matched to the generator's own in everything else: its draws (under its own
 name), placement, SNR target over the present detectors, window and whitening. The violations:
 `gf.WrongDelay(margin_seconds)`, one present detector's copy shifted beyond its delay from another by their light
-travel plus the margin; `gf.OneDetector()`, the signal in one present detector alone; `gf.MismatchedWaveforms(differ)`,
-a waveform of its own in each detector, differing in the named draws that change its shape but not its extent, which
+travel plus the margin; `gf.MismatchedWaveforms(differ)`, a waveform of its own in each detector, differing in the named draws that change its shape but not its extent, which
 its one placement reads (a binary's masses or spins; a ringdown's, chirplet's or periodic wave's frequencies; a
 white-noise burst's noise), and balanced to one source's loudness; and `gf.TimeReversed()`, the
 waveform reversed in time, only for a binary or a ringdown, whose reversal is a waveform no source of their kind
@@ -180,9 +179,7 @@ makes. `ReturnVariables.VIOLATION` (B, G) labels each generator's `gf.ViolationC
 NaN where the generator injected nothing. A network of no more detectors than the independent waveforms a generator's
 polarisations carry (`independent_waveforms`: one for an aligned-spin binary, two for a precessing one or a
 white-noise burst of independent polarisations) receives any waveforms in them, so a wrong delay or a mismatch needs
-one more detector present. One detector needs the detectors no source silences together at any sky: three, or five
-where the generator can be linearly polarised (`linearly_polarisable`: a binary whose inclination can be pi/2, a
-burst of eccentricity 1). A network that can present fewer is refused by name, detectors that receive one signal
+one more detector present. A network that can present fewer is refused by name, detectors that receive one signal
 alike counted once where a real source could then give it.
 
 ```python

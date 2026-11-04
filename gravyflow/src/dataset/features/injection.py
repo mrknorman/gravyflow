@@ -469,18 +469,6 @@ class WaveformGenerator:
         """
         return 2
 
-    @property
-    def linearly_polarisable(self) -> bool:
-        """
-        Whether its polarisations can be proportional, a linearly polarised
-        source's, which one condition on the sky and the polarisation angle
-        silences in a detector (gf.OneDetector). Declared by each generator:
-        True, the safe answer, where it declares none, and so for a periodic
-        wave (plus only) and a white-noise burst (plus only, or two
-        independent noises, among whose pairs are proportional ones).
-        """
-        return True
-
     def __post_init__(self):
         if self.name is not None:
             check_name(self.name, "generator name")
@@ -1193,18 +1181,6 @@ class CBCGenerator(WaveformGenerator):
         turns, so its cross polarisation is no quadrature of its plus.
         """
         return 2 if self.precesses else 1
-
-    @property
-    def linearly_polarisable(self) -> bool:
-        """
-        Where its inclination can be pi / 2 (or another odd multiple of it):
-        seen edge-on, its cross polarisation vanishes. And where it precesses,
-        whose polarisations nothing here holds apart.
-        """
-        if self.precesses:
-            return True
-        low, high = get_support_bounds(self.inclination_radians, "inclination_radians")
-        return bool(np.floor(high / np.pi - 0.5) >= np.ceil(low / np.pi - 0.5))
 
     @property
     def precesses(self) -> bool:
@@ -2150,7 +2126,7 @@ class InjectionGenerator:
                 - VIOLATION, when requested: each generator's gf.ViolationCode.
 
         Hard examples (gf.HardExampleGenerator): a violation that changes the
-        projection (a wrong delay, one detector) is drawn here, from the
+        projection (a wrong delay) is drawn here, from the
         generator's ``inject/{g}/violation/...`` streams, and applied to the
         projected strain before it is cropped and scaled, so an SNR target is
         still the network SNR of the detectors present; CENTRAL_TIME gives each
@@ -2303,9 +2279,8 @@ class InjectionGenerator:
                 ops.cast(current_shifts, "float32") / self.sample_rate_hertz
 
             # A hard example's change to the projection: each copy's shift
-            # beyond its delay, and the detectors that keep the signal.
-            violation_shifts, violation_kept = (None, None) \
-                if generator.violation is None else generator.draw_projection(
+            # beyond its delay.
+            violation_shifts = None if generator.violation is None else generator.draw_projection(
                     network, time_delays, generator_streams, label, num_inj,
                     offsets_seconds=shift_seconds,
                     extent_seconds=self._generator_parameter(injection_parameters, SIGNAL_EXTENT, i),
@@ -2329,8 +2304,6 @@ class InjectionGenerator:
                 # network, so it has no arrival time.
                 if isinstance(network, gf.ExampleNetworks):
                     normalized_time = ops.where(network.present > 0, normalized_time, np.nan)
-                if violation_kept is not None:
-                    normalized_time = ops.where(violation_kept > 0, normalized_time, np.nan)
 
                 generator_labels[ReturnVariables.CENTRAL_TIME] = normalized_time
 
@@ -2441,12 +2414,6 @@ class InjectionGenerator:
                     onsource_duration_seconds=onsource_duration_seconds
                 )
 
-            # A one-detector signal: scaled as the real signal it is, then
-            # every detector's copy but the kept one emptied, so that one holds
-            # what the real signal gives it, and the network SNR is its alone.
-            if violation_kept is not None:
-                projected = projected * ops.convert_to_tensor(violation_kept)[..., None]
-
             # 6. Sum into the noise.
             final_onsource = final_onsource + projected
             scaled_injections_list.append(projected)
@@ -2465,11 +2432,8 @@ class InjectionGenerator:
                 if isinstance(key, WaveformParameters) and value is not None:
                     generator_labels[key] = _at_gain(value, gain, key.value.amplitude_power)
 
-            # The target labels its own scaling type, unless detectors' copies
-            # were emptied after an SNR scaling: then the SNR left is measured.
-            attained = violation_kept is None or type_ is not ScalingTypes.SNR
             for label_type in label_types:
-                if label_type == type_ and attained:
+                if label_type == type_:
                     value = target_val
                 elif label_type == ScalingTypes.HRSS:
                     value = unit_hrss * factor
