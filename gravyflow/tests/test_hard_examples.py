@@ -4,7 +4,9 @@ the examples are the generator's in everything else.
 """
 
 import dataclasses
+import hashlib
 import itertools
+import pickle
 
 import numpy as np
 import pytest
@@ -44,9 +46,9 @@ def ringdown(**kwargs):
         "frequency_hertz": constant(100.0), "damping_time_seconds": constant(0.02), **kwargs})
 
 
-def dataset(generators, ifos=(gf.IFO.H1, gf.IFO.L1, gf.IFO.V1), seed=3, outputs=()):
+def dataset(generators, ifos=(gf.IFO.H1, gf.IFO.L1, gf.IFO.V1), seed=3, outputs=(), group="train"):
     return gf.Dataset(
-        seed=seed, group="train",
+        seed=seed, group=group,
         noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.COLORED),
         ifos=list(ifos) if isinstance(ifos, tuple) else ifos,
         waveform_generators=generators,
@@ -982,3 +984,56 @@ def test_what_cannot_label_or_hold_a_violation_is_refused_when_built():
     assert hard.placement_range_seconds(1.0) == wnb(network=network).placement_range_seconds(1.0)
     with pytest.raises(ValueError, match="WrongDelay hard example shifts its copy"):
         dataset([hard])
+
+
+#: A hard example of each violation, from the generator it suits.
+STREAM_CASES = {
+    "wrong delay": lambda: gf.HardExampleGenerator(wnb(), gf.WrongDelay(uniform(0.01, 0.02)), name="hard"),
+    "one detector": lambda: gf.HardExampleGenerator(wnb(), gf.OneDetector(), name="hard"),
+    "mismatched": lambda: gf.HardExampleGenerator(wnb(), gf.MismatchedWaveforms("noise", correlation=uniform(0.2, 0.6)),
+                                                  name="hard"),
+    "time reversed": lambda: gf.HardExampleGenerator(ringdown(), gf.TimeReversed(), name="hard"),
+}
+
+
+def _digest(batch):
+    h = hashlib.sha256()
+    for part in batch:
+        for key in sorted(part):
+            h.update(key.encode())
+            h.update(np.ascontiguousarray(np.asarray(part[key])).tobytes())
+    return h.hexdigest()
+
+
+@pytest.mark.parametrize("ifos", [NETWORK, DETECTORS], ids=["fixed network", "per-example network"])
+@pytest.mark.parametrize("case", STREAM_CASES)
+def test_a_hard_example_leaves_the_draws_beside_it_as_they_were(case, ifos):
+    """
+    A hard example draws from streams of its own name, so the generator beside it, the noise and the network draw what
+    they draw without it, to the byte.
+    """
+    outputs = (RV.OFFSOURCE,)
+    x_alone, y_alone = dataset([wnb(name="real")], ifos=ifos, outputs=outputs)[1]
+    x_beside, y_beside = dataset([wnb(name="real"), STREAM_CASES[case]()], ifos=ifos, outputs=outputs)[1]
+    np.testing.assert_array_equal(np.asarray(x_beside["DETECTOR_MASK"]), np.asarray(x_alone["DETECTOR_MASK"]))
+    for key, alone in y_alone.items():
+        alone, beside = np.asarray(alone), np.asarray(y_beside[key])
+        if key != "OFFSOURCE":
+            # The generator's own: its column of the generator axis.
+            assert beside.shape[1] == 2 and alone.shape[1] == 1, key
+            beside = beside[:, :1]
+        assert alone.tobytes() == beside.tobytes(), key
+
+
+@pytest.mark.parametrize("case", STREAM_CASES)
+def test_a_hard_examples_batches_are_a_function_of_their_address(case):
+    """
+    A hard example's batch is the same rebuilt and pickled, and another at another index, seed or split.
+    """
+    reference = _digest(dataset([STREAM_CASES[case]()])[0])
+    assert _digest(dataset([STREAM_CASES[case]()])[0]) == reference
+    assert _digest(pickle.loads(pickle.dumps(dataset([STREAM_CASES[case]()])))[0]) == reference
+    assert _digest(dataset([pickle.loads(pickle.dumps(STREAM_CASES[case]()))])[0]) == reference
+    others = [dataset([STREAM_CASES[case]()])[1], dataset([STREAM_CASES[case]()], seed=4)[0],
+              dataset([STREAM_CASES[case]()], group="validate")[0]]
+    assert len({reference, *map(_digest, others)}) == 4

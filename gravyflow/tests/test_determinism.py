@@ -9,12 +9,15 @@ their address with independent splits.
 
 import copy
 import hashlib
+import importlib.util
+import json
 import pickle
 import re
 import subprocess
 import sys
 import textwrap
 import warnings
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -742,3 +745,29 @@ class TestKerasEpochs:
     def test_unbound_fresh_split_warns_under_keras(self):
         with pytest.warns(UserWarning, match="epoch_callback"):
             self.fit(self.curriculum_dataset(), epochs=1, bind=False)
+
+
+def _stream_digests():
+    """The pinned stream digests' cases and digests (fixtures/stream_digests), as its make script computes them."""
+    path = Path(__file__).parent / "fixtures" / "stream_digests"
+    spec = importlib.util.spec_from_file_location("stream_digests", path / "make_reference.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module, json.loads((path / "reference.json").read_text())
+
+
+STREAM_DIGESTS, PINNED = _stream_digests()
+
+
+class TestPinnedStreams:
+    """
+    The datasets of every generator and of per-example networks of bundled detectors draw what they drew when their
+    digests were pinned, before hard examples were added: a later generator or stream moves none of theirs.
+    """
+
+    def test_the_reference_pins_every_case(self):
+        assert set(PINNED) == set(STREAM_DIGESTS.CASES)
+
+    @pytest.mark.parametrize("name", sorted(STREAM_DIGESTS.CASES))
+    def test_a_dataset_draws_what_it_drew_when_pinned(self, name):
+        assert STREAM_DIGESTS.digests(name) == PINNED[name]
