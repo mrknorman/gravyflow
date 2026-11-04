@@ -1075,6 +1075,29 @@ def test_what_cannot_label_or_hold_a_violation_is_refused_when_built():
         dataset([hard])
 
 
+def test_a_hard_example_checks_its_generator_wherever_it_is_used():
+    """
+    Its generator is an object of its own, which may change after the hard example is built (as the validator
+    changes a dataset's generators): a mismatch whose one differing draw is made to take one value is refused by name
+    as a dataset binds it and as a batch is projected.
+    """
+    def one_valued(hard):
+        hard.generator.frequency_hertz = constant(150.0)
+        return hard
+
+    def mismatch():
+        return gf.HardExampleGenerator(ringdown(frequency_hertz=uniform(100.0, 200.0)),
+                                       gf.MismatchedWaveforms(("frequency_hertz",)))
+
+    with pytest.raises(ValueError, match="has one value only"):
+        dataset([one_valued(mismatch())])
+    built = dataset([mismatch()])
+    built[0]
+    one_valued(built.waveform_generators[0])
+    with pytest.raises(ValueError, match="has one value only"):
+        built[1]
+
+
 #: A hard example of each violation, from the generator it suits.
 STREAM_CASES = {
     "wrong delay": lambda: gf.HardExampleGenerator(wnb(), gf.WrongDelay(uniform(0.01, 0.02)), name="hard"),

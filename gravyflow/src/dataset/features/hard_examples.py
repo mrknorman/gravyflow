@@ -97,7 +97,7 @@ class Violation:
     code : ClassVar[ViolationCode]
 
     def check(self, generator : WaveformGenerator) -> None:
-        """Refuse by name a generator whose signals it cannot violate, when the hard example is built."""
+        """Refuse by name a generator whose signals it cannot violate, wherever the hard example is used."""
 
     def fewest_detectors(self, generator : WaveformGenerator) -> int:
         """
@@ -114,7 +114,7 @@ class Violation:
         return generator.independent_waveforms + 1
 
     def check_scaling(self, scaling_method) -> None:
-        """Refuse by name a scaling it cannot be given, when the hard example is built and as it is scaled."""
+        """Refuse by name a scaling it cannot be given, wherever the hard example is used."""
 
     def reach_seconds(self, network) -> float:
         """
@@ -679,7 +679,6 @@ class HardExampleGenerator(WaveformGenerator):
                 f"A HardExampleGenerator's violation is a gf.Violation "
                 f"({', '.join(v.__name__ for v in Violation.__subclasses__())}), not {violation!r}."
             )
-        violation.check(generator)
         self.generator = generator
         self.violation = violation
         self.name = None if name is None else check_name(name, "generator name")
@@ -690,8 +689,8 @@ class HardExampleGenerator(WaveformGenerator):
         ):
             setattr(self, attribute, getattr(generator, attribute))
         self.distributed_attributes = generator.distributed_attributes
+        # Its network is set last, so the checks it runs (``_check``) see the rest.
         self.network = generator.network
-        violation.check_scaling(self.scaling_method)
 
     def specification(self) -> dict:
         """
@@ -707,14 +706,30 @@ class HardExampleGenerator(WaveformGenerator):
 
     @network.setter
     def network(self, network):
-        # Checked on every assignment, a dataset's binding included.
+        # Checked on every assignment: when it is built, and a dataset's binding.
         network = self.init_network(network, self.geometry_stream())
-        if network is not None:
-            self._check_detectors(_fewest_independent(network), "its network can have")
+        self._check(network)
         self._network = network
 
-    def _check_detectors(self, fewest : int, where : str) -> None:
-        """Refuse by name ``fewest`` detectors present, counted by the violation, where it needs more."""
+    def _check(self, network, present : Optional[np.ndarray] = None) -> None:
+        """
+        Refuse by name what cannot hold its violation, wherever it is used:
+        as its network is set (when it is built, and as a dataset binds it)
+        and as each batch is projected (``draw_projection``). The generator
+        and the scaling (``Violation.check`` and ``check_scaling``), since the
+        generator is the caller's own object and either may change after the
+        hard example is built; and the independent detectors an example can
+        present (``Violation.fewest_detectors``): ``network``'s fewest, or
+        where ``present`` (Batch, Detectors) is given, each example's own.
+        """
+        self.violation.check(self.generator)
+        self.violation.check_scaling(self.scaling_method)
+        if network is None:
+            return
+        if present is None:
+            fewest, where = _fewest_independent(network), "its network can have"
+        else:
+            fewest, where = int(np.min(_response_rank(network.response, present))), "an example of this batch has"
         needed = self.violation.fewest_detectors(self.generator)
         if fewest < needed:
             raise ValueError(
@@ -812,12 +827,10 @@ class HardExampleGenerator(WaveformGenerator):
         """
         The violation's gain for each detector's copy, (Batch, Detectors), or
         None (``Violation.detector_balance``: a mismatched waveform's
-        detectors balanced to one source's loudness), its scaling checked
-        again, as it may have changed since the hard example was built.
-        ``polarisations`` is (Batch, Detectors, 2, Time) for one waveform per
+        detectors balanced to one source's loudness), its scaling checked as
+        the batch was projected (``draw_projection``). ``polarisations`` is (Batch, Detectors, 2, Time) for one waveform per
         detector, the window the injection layer crops centred in it.
         """
-        self.violation.check_scaling(self.scaling_method)
         return self.violation.detector_balance(polarisations, background, sample_rate_hertz,
                                                onsource_duration_seconds)
 
@@ -843,8 +856,8 @@ class HardExampleGenerator(WaveformGenerator):
         num_detectors = int(ops.shape(time_delays)[-1])
         present = np.asarray(network.present, dtype=np.float64) if isinstance(network, ExampleNetworks) \
             else np.ones((num_examples, num_detectors))
-        # A network drawn per example is counted here, its geometry known.
-        self._check_detectors(int(np.min(_response_rank(network.response, present))), "an example of this batch has")
+        # Every check again, each example's network counted with its geometry known.
+        self._check(network, present)
 
         def stream(name):
             return streams.stream(f"inject/{label}/violation/{name}")
