@@ -725,25 +725,18 @@ class HardExampleGenerator(WaveformGenerator):
     no partial signals of a generator whose signal cut by the window can
     repeat itself (``repeats_when_cut``, gf.WrongDelay).
 
-    Every check runs wherever the hard example is used, as its network is set
-    (when it is built, and as a dataset binds it) and as each batch is
-    projected (``_check``), since its generator may change after it is built.
+    Its generator and violation may be reassigned after it is built, and its
+    generator changed, as the validator changes a dataset's generators: each
+    is checked to be what it can be (a coherent generator, not a
+    gf.IncoherentGenerator or another hard example; a gf.Violation) as it is
+    assigned, and every other check runs wherever the hard example is used,
+    as its network is set (when it is built, and as a dataset binds it) and
+    as each batch is projected (``_check``).
 
     ``ReturnVariables.VIOLATION`` gives each example's ``violation.code``.
     """
 
     def __init__(self, generator : WaveformGenerator, violation : Violation, name : Optional[str] = None):
-        if not isinstance(generator, WaveformGenerator) or isinstance(
-                generator, (IncoherentGenerator, HardExampleGenerator)):
-            raise TypeError(
-                f"A HardExampleGenerator wraps a coherent waveform generator (a CBCGenerator, a WNBGenerator...), "
-                f"not {generator!r}."
-            )
-        if not isinstance(violation, Violation):
-            raise TypeError(
-                f"A HardExampleGenerator's violation is a gf.Violation "
-                f"({', '.join(v.__name__ for v in Violation.__subclasses__())}), not {violation!r}."
-            )
         self.generator = generator
         self.violation = violation
         self.name = None if name is None else check_name(name, "generator name")
@@ -759,6 +752,37 @@ class HardExampleGenerator(WaveformGenerator):
 
     def __repr__(self) -> str:
         return f"HardExampleGenerator(generator={self.generator!r}, violation={self.violation!r}, name={self.name!r})"
+
+    @property
+    def generator(self) -> WaveformGenerator:
+        return self._generator
+
+    @generator.setter
+    def generator(self, generator : WaveformGenerator):
+        # Checked on every assignment, not only when it is built: an incoherent generator's detectors would hold
+        # waveforms of their own labelled with this violation, and another hard example's violation would be dropped
+        # with its projection.
+        if not isinstance(generator, WaveformGenerator) or isinstance(
+                generator, (IncoherentGenerator, HardExampleGenerator)):
+            raise TypeError(
+                f"A HardExampleGenerator wraps a coherent waveform generator (a CBCGenerator, a WNBGenerator...), "
+                f"not {generator!r}."
+            )
+        self._generator = generator
+
+    @property
+    def violation(self) -> Violation:
+        return self._violation
+
+    @violation.setter
+    def violation(self, violation : Violation):
+        # Checked on every assignment, as its generator is.
+        if not isinstance(violation, Violation):
+            raise TypeError(
+                f"A HardExampleGenerator's violation is a gf.Violation "
+                f"({', '.join(v.__name__ for v in Violation.__subclasses__())}), not {violation!r}."
+            )
+        self._violation = violation
 
     @property
     def independent_waveforms(self) -> int:
@@ -803,10 +827,11 @@ class HardExampleGenerator(WaveformGenerator):
         """
         Refuse by name what cannot hold its violation, wherever it is used:
         as its network is set (when it is built, and as a dataset binds it)
-        and as each batch is projected (``draw_projection``). Its generator
-        and its own settings (``Violation.check``), since the generator is the
-        caller's own object and either may change after the hard example is
-        built; and the independent detectors an example can
+        and as each batch is projected (``draw_projection``). Its generator's
+        draws and its own settings (``Violation.check``), since the generator
+        is the caller's own object and either may change after the hard
+        example is built (the generator's and the violation's types are
+        checked as they are assigned); and the independent detectors an example can
         present (``Violation.fewest_detectors``): ``network``'s fewest, or
         where ``present`` (Batch, Detectors) is given, each example's own.
         """

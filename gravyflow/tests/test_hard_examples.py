@@ -1227,6 +1227,25 @@ def test_a_hard_example_checks_its_generator_wherever_it_is_used():
         built[1]
 
 
+def test_a_hard_examples_generator_and_violation_are_checked_as_they_are_assigned():
+    """
+    Its generator and violation are attributes the caller may reassign after it is built. An incoherent generator
+    would give each detector its own burst and have it labelled with the violation, and another hard example's
+    violation would be dropped with its projection, so each is refused by name as it is assigned, as when it is built.
+    """
+    hard = gf.HardExampleGenerator(wnb(), gf.WrongDelay(0.005))
+    for other in (gf.IncoherentGenerator([wnb(), wnb(), wnb()]),
+                  gf.HardExampleGenerator(wnb(), gf.MismatchedWaveforms("noise")), "a burst"):
+        with pytest.raises(TypeError, match="wraps a coherent"):
+            hard.generator = other
+    with pytest.raises(TypeError, match="violation is a gf.Violation"):
+        hard.violation = "late"
+    assert type(hard.generator) is gf.WNBGenerator and type(hard.violation) is gf.WrongDelay
+    shorter = wnb(duration_seconds=constant(0.05))
+    hard.generator = shorter
+    assert hard.generator is shorter
+
+
 #: A hard example of each violation, from the generator it suits.
 STREAM_CASES = {
     "wrong delay": lambda: gf.HardExampleGenerator(wnb(), gf.WrongDelay(uniform(0.01, 0.02)), name="hard"),

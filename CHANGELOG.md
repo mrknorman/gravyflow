@@ -144,9 +144,12 @@ repository before it may need the changes below.
   it as the generator's signals, so it differs in its violation alone. Its scaling method, injection chance, padding,
   allow_partially_out_of_window, sky and reference time are its generator's when it is built: the injection layer
   reads them from it, and they fingerprint it beside its generator and violation. Its independent_waveforms,
-  shape_attributes, extent_attributes and repeats_when_cut are its generator's, and every check it makes of its
-  generator, its own settings and its network runs wherever it is used: as its network is set (when it is built, and as a dataset binds it) and as
-  each batch is projected, since its generator may change after it is built. `gf.Violation`, the base, a subclass
+  shape_attributes, extent_attributes and repeats_when_cut are its generator's. Its generator and violation may be
+  reassigned after it is built, and its generator changed (as the validator changes a dataset's generators): each is
+  checked to be what it can be (a coherent generator, not an `IncoherentGenerator` or another hard example; a
+  `gf.Violation`) as it is assigned, and every other check it makes of its generator, its own settings and its network
+  runs wherever it is used, as its network is set (when it is built, and as a dataset binds it) and as each batch is
+  projected. `gf.Violation`, the base, a subclass
   that names no code, and one whose code is NONE, which would label its examples real signals, are refused by name.
   There is no one-detector violation (a signal in one detector alone): a lone copy in one detector is reachable by a
   real source near the other detectors' nulls, with no margin at the noise level for networks of up to four
@@ -209,8 +212,8 @@ repository before it may need the changes below.
   waveforms). A network whose geometry is fixed (a `gf.Network`,
   or a `gf.Detectors` of bundled detectors and slots at fixed sites, every subset of its fewest present detectors
   counted) is refused by name when it is set, and where a slot's geometry is drawn, an example with fewer as it is
-  projected (`gf.Detectors.fixed_response` gives a fixed one's tensors). So are a hard example as a component of a `gf.IncoherentGenerator`, which would drop its
-  violation, and `VIOLATION` with an `IncoherentGenerator`, whose detectors' waveforms differ though it names no
+  projected (`gf.Detectors.fixed_response` gives a fixed one's tensors). So are a hard example as a component of a
+  `gf.IncoherentGenerator`, which would drop its violation, and `VIOLATION` with an `IncoherentGenerator`, whose detectors' waveforms differ though it names no
   violation (a labelled mismatch is `gf.MismatchedWaveforms`), wherever the label is made.
 
 - **Hard examples: labels and streams.** `ReturnVariables.VIOLATION` (B, G) gives each generator's
