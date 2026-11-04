@@ -802,10 +802,15 @@ class HardExampleGenerator(WaveformGenerator):
     (F+, Fx), a set of measure zero, a wrong delay of the third of a
     generator whose polarisations carry two waveforms is a real signal, and
     near them its violation shrinks as the squared sine of the angle between
-    those vectors. TimeReversed takes only a binary, whose reversal leaves
-    its family (gf.TimeReversed), and WrongDelay no partial signals of a
-    generator whose signal cut by the window can repeat itself
-    (``repeats_when_cut``, gf.WrongDelay).
+    those vectors. H1 and L1 are nearly co-aligned, so on H1-L1-V1 a wrong
+    delay of V1 carries much less violation than one of H1 or L1: of the
+    change a wrong delay makes to its detector's copy, the network's null
+    stream, which no real source reaches, holds a median share of 0.10 for V1
+    against 0.41 for H1 and 0.45 for L1 (over an isotropic sky, with equal
+    noise), and under 1 % for V1 on about 9 % of the sky. TimeReversed takes
+    only a binary, whose reversal leaves its family (gf.TimeReversed), and
+    WrongDelay no partial signals of a generator whose signal cut by the
+    window can repeat itself (``repeats_when_cut``, gf.WrongDelay).
 
     Its generator and violation may be reassigned after it is built, and its
     generator changed, as the validator changes a dataset's generators: each

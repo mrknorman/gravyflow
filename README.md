@@ -190,7 +190,10 @@ shows the signal: a hard example's partial signal is kept where some of it reach
 one may arrive wholly outside it in one). The count reads the network alone, but what a wrong delay violates depends on
 the sky too: on three detectors, at the skies where two of them have parallel antenna vectors (F+, Fx), a set of
 measure zero, a wrong delay of the third of a two-waveform generator is a real signal, and near them its violation
-shrinks as the squared sine of the angle between those vectors.
+shrinks as the squared sine of the angle between those vectors. H1 and L1 are nearly co-aligned, so on H1-L1-V1 a wrong
+delay of V1 carries much less violation than one of H1 or L1: of the change a wrong delay makes to its detector's copy,
+the network's null stream, which no real source reaches, holds a median share of 0.10 for V1 against 0.41 for H1 and
+0.45 for L1 (over an isotropic sky, with equal noise), and under 1 % for V1 on about 9 % of the sky.
 
 ```python
 binary = gf.CBCGenerator(mass_1_msun=uniform(15.0, 80.0), mass_2_msun=uniform(15.0, 80.0),
