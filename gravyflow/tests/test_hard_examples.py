@@ -482,7 +482,7 @@ def test_a_wrong_delays_margin_lies_above_the_delays_resolution():
     """
     from gravyflow.src.dataset.features.hard_examples import MIN_MARGIN_SECONDS
     for margin in (0.0, uniform(0.0, 0.03), -0.01, 0.5 * MIN_MARGIN_SECONDS):
-        with pytest.raises(ValueError, match="bounded and above"):
+        with pytest.raises(ValueError, match="bounded and at least"):
             gf.WrongDelay(margin)
     gf.WrongDelay(uniform(2.0 * MIN_MARGIN_SECONDS, 0.03))
 
@@ -658,7 +658,7 @@ def test_a_generators_shape_attributes_change_its_shape_and_no_other_draw_does(g
 
 
 def test_hard_examples_refuse_what_they_cannot_be():
-    with pytest.raises(ValueError, match="bounded and above"):
+    with pytest.raises(ValueError, match="bounded and at least"):
         gf.WrongDelay(gf.Distribution(mean=0.0, std=0.01, type_=gf.DistributionType.NORMAL))
     with pytest.raises(ValueError, match="does not draw"):
         gf.HardExampleGenerator(wnb(), gf.MismatchedWaveforms("mass_1_msun"))

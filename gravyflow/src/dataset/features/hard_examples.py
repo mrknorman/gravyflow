@@ -49,7 +49,9 @@ from gravyflow.src.rng.tree import BatchStreams
 
 #: The least a wrong delay's margin may be, in seconds. The projection's delays
 #: are float32, within about 0.1 us of the float64 light travel a margin is
-#: added to, so a smaller margin may leave a delay a real source makes.
+#: added to, so a smaller margin may leave a delay a real source makes. It
+#: guards that rounding alone: a margin this small is a wrong delay by
+#: construction, not one a model can detect (see gf.WrongDelay).
 MIN_MARGIN_SECONDS = 1.0e-6
 
 
@@ -246,7 +248,7 @@ class WrongDelay(Violation):
         low, high = get_support_bounds(margin, "WrongDelay's margin_seconds")
         if not (np.isfinite(low) and np.isfinite(high) and low >= MIN_MARGIN_SECONDS):
             raise ValueError(
-                f"WrongDelay's margin_seconds must be bounded and above {MIN_MARGIN_SECONDS:g} s (what the "
+                f"WrongDelay's margin_seconds must be bounded and at least {MIN_MARGIN_SECONDS:g} s (what the "
                 f"projection's float32 delays resolve), so that every wrong delay exceeds its pair's light travel; "
                 f"{margin!r} reaches {low:g} to {high:g} s."
             )
