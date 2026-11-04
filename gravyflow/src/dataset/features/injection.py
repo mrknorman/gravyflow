@@ -461,9 +461,10 @@ class WaveformGenerator:
         How many independent waveforms its polarisations carry: 1 where the
         cross polarisation is the plus a quarter cycle on, rescaled, or none;
         2 where they are drawn apart. Each detector receives a combination of
-        the polarisations, delayed, so a network of that many detectors or
-        fewer receives any waveforms in them, and only a larger one can show
-        a signal no source of this generator gives (gf.HardExampleGenerator).
+        the polarisations, delayed, so that many detectors of independent
+        responses receive any waveforms in them, and only a network of more
+        independent responses can show a signal no source of this generator
+        gives (gf.HardExampleGenerator, which counts them by rank).
         Declared by each generator: two, the most a signal carries, where it
         declares none.
         """

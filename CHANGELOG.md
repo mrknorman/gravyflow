@@ -142,8 +142,12 @@ repository before it may need the changes below.
   of what a detector network can receive from a real source, one of the three below. It draws as its generator does
   under its own name, and the injection layer places, projects, scales over the present detectors, crops and whitens
   it as the generator's signals, so it differs in its violation alone. Its scaling method, injection chance, padding,
-  sky and reference time are its generator's when it is built: the injection layer reads them from it, and they
-  fingerprint it beside its generator and violation. There is no one-detector violation (a signal in one detector
+  allow_partially_out_of_window, sky and reference time are its generator's when it is built: the injection layer
+  reads them from it, and they fingerprint it beside its generator and violation. Its independent_waveforms,
+  shape_attributes and extent_attributes are its generator's, and every check it makes of its generator, its scaling
+  and its network runs wherever it is used: as its network is set (when it is built, and as a dataset binds it) and as
+  each batch is projected, since its generator may change after it is built. `gf.Violation`, the base, and a subclass
+  that names no code are refused by name. There is no one-detector violation (a signal in one detector
   alone): a lone copy in one detector is reachable by a real source near the other detectors' nulls, with no margin
   at the noise level for networks of up to four detectors, so it cannot be labelled a violation. A model's behaviour
   on one detector is tested with networks of one present detector (`gf.Detectors`' `num_present` from 1).
@@ -202,10 +206,12 @@ repository before it may need the changes below.
 
 - **Hard examples: labels and streams.** `ReturnVariables.VIOLATION` (B, G) gives each generator's
   `gf.ViolationCode` (NONE, 0, for a real signal), float32, NaN where the generator injected nothing (its
-  `injection_chance`); `CENTRAL_TIME` gives each copy's arrival. The violations' own draws have streams of their own (`inject/{g}/violation/{detector,partner,sign,margin}`,
-  `wave/{g}/violation/correlation`, and `wave/{g}/comp/{j}/...` for a detector's differing draws), so every existing
-  stream draws as before: a dataset without a hard example draws its digests of before (`fixtures/stream_digests`),
-  and a generator beside a hard example draws what it draws alone.
+  `injection_chance`); `CENTRAL_TIME` gives each copy's arrival. The violations' own draws have streams of their own
+  (`inject/{g}/violation/{detector,partner,sign,margin}`, `wave/{g}/violation/correlation`, and
+  `wave/{g}/comp/{j}/...` for a detector's differing draws), so every existing stream draws as before: a dataset
+  without a hard example draws its digests of before (`fixtures/stream_digests`: its drawn labels, its placement in
+  whole samples and the sign of its white noise), and a generator beside a hard example, before or after it, draws
+  what it draws alone.
 
 - **Hard examples: measured.** A wrong delay's other pairs: for margins of 2 to 20 ms on networks of two to four
   detectors drawn on the sphere, the shifted copy exceeds the largest margin on another pair in about a quarter of

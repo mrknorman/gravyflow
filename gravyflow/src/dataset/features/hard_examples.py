@@ -26,9 +26,9 @@ are its own hooks, which the hard example calls in every case.
 """
 
 from copy import copy
-from itertools import combinations
 from dataclasses import dataclass
 from enum import IntEnum
+from itertools import combinations
 from typing import ClassVar, Optional, Tuple, Union
 
 import jax.numpy as jnp
@@ -194,7 +194,7 @@ class WrongDelay(Violation):
     A range narrower than twice the farthest shift (the network's longest
     light travel plus the largest margin), for the generator's longest
     signal, cannot hold the copy whatever the placement and is refused by
-    name when the dataset is built.
+    name when the dataset is built and as the copy is projected.
     """
     margin_seconds : Union[float, "gf.Distribution"]
 
@@ -652,8 +652,8 @@ class HardExampleGenerator(WaveformGenerator):
     It draws as the generator does, from its distributions, but under its own
     name (``name``, default its position and class), so its examples are
     independent of the generator's own in a dataset beside it. Its scaling
-    method, injection chance, padding, sky and reference time are its own,
-    the generator's when it is built: the injection layer reads them from it,
+    method, injection chance, padding, allow_partially_out_of_window, sky and
+    reference time are its own, the generator's when it is built: the injection layer reads them from it,
     and they fingerprint it, so one changed afterwards (as the validator
     does) changes the hard example, and the generator's are not read. Its
     network is the generator's, or the dataset's. Placement,
@@ -663,17 +663,22 @@ class HardExampleGenerator(WaveformGenerator):
     its generator's signals arrive by the copy's direction, gf.WrongDelay).
 
     The violation acts through its own hooks (``Violation``), which this calls
-    in every case. Every example needs the detectors present that the
-    violation asks of the generator (``Violation.fewest_detectors``: one
-    more than the independent waveforms the generator's polarisations carry
-    for a wrong delay or a mismatch, one for a reversal), counted as the rank of the span of their response tensors
-    (detectors of equal, opposite or dependent responses count once): a
+    in every case. Every example needs the independent detectors present
+    that the violation asks of the generator (``Violation.fewest_detectors``:
+    one more than the independent waveforms the generator's polarisations
+    carry for a wrong delay or a mismatch, one for a reversal), counted as the
+    rank of the span of their response tensors (``_response_rank``:
+    detectors of equal, opposite or dependent responses count once). A
     network whose geometry is fixed (a Network, or gf.Detectors of bundled
-    detectors and fixed slots), or a num_present, that can give fewer is
-    refused by name when it is set, its fewest present detectors' every
-    subset counted; and where a slot's geometry is drawn, an example with
-    fewer is refused as it is projected. TimeReversed takes only a binary, whose reversal
-    leaves its family (gf.TimeReversed).
+    detectors and fixed slots) that can give fewer is refused by name when it
+    is set, every subset of its fewest present detectors counted; where a
+    slot's geometry is drawn, its fewest present detectors are checked when it
+    is set and each example as it is projected. TimeReversed takes only a
+    binary, whose reversal leaves its family (gf.TimeReversed).
+
+    Every check runs wherever the hard example is used, as its network is set
+    (when it is built, and as a dataset binds it) and as each batch is
+    projected (``_check``), since its generator may change after it is built.
 
     ``ReturnVariables.VIOLATION`` gives each example's ``violation.code``.
     """
