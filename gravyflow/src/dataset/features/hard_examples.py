@@ -612,14 +612,16 @@ class TimeReversed(Violation):
     refused by name, since its reversal can be one its generator makes, or
     differ from one only as the generator's own draws do: a white-noise
     burst's is another such burst, a periodic wave's another wave, a
-    chirplet's one from its end frequency to its start (its generator's own
-    where its start and end distributions allow the swap), and a
-    sine-Gaussian's its own envelope and frequency, its handedness flipped
-    where its eccentricity is below 1 and its phase changed where it is
-    nonzero. A ringdown's reversal, which rises into its peak and stops, is
-    no ringdown, but its signal then lies before its reference time where a
-    ringdown's lies after it, so a reversed ringdown placed by its reference
-    time is not placed as the generator's signals are.
+    chirplet's one from its end frequency to its start (a chirplet of its
+    generator's only where its start and end distributions allow the swap),
+    and a sine-Gaussian's its own envelope and frequency. A reversed chirplet
+    or sine-Gaussian also has its cross polarisation negated, so its
+    handedness flips where its eccentricity is below 1 and its phase is
+    negated where it is nonzero. A ringdown's reversal, which rises into its
+    peak and stops, is no ringdown, but its signal then lies before its
+    reference time where a ringdown's lies after it, so a reversed ringdown
+    placed by its reference time is not placed as the generator's signals
+    are.
     """
     code : ClassVar[ViolationCode] = ViolationCode.TIME_REVERSED
 
@@ -634,9 +636,9 @@ class TimeReversed(Violation):
                 f"TimeReversed takes a generator whose waveform reversed in time leaves its family "
                 f"(time_reversal_leaves_family: a CBCGenerator), not a {type(generator).__name__}: a white-noise "
                 "burst reversed is another such burst, a periodic wave a periodic wave, a chirplet one from its end "
-                "frequency to its start, a sine-Gaussian its own wavelet but for its handedness and phase, and a "
-                "ringdown's signal reversed lies before its reference time, so it would not be placed as a "
-                "ringdown's signals are."
+                "frequency to its start and a sine-Gaussian its own wavelet, each but for its handedness and "
+                "phase, and a ringdown's signal reversed lies before its reference time, so it would not be placed "
+                "as a ringdown's signals are."
             )
 
     def generate(self, generator, network, num_waveforms, sample_rate_hertz, duration_seconds, streams):

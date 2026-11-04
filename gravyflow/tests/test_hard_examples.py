@@ -803,21 +803,35 @@ def _forward_and_reversed(generator, seed=2, num_waveforms=1, **parameters):
     return np.asarray(made, np.float64), np.asarray(_reflect(made), np.float64)
 
 
+def _reversed_is_negated_phase_with_cross_negated(generator, phase_radians=0.7, swap=None, **parameters):
+    """
+    A waveform whose h+ goes as cos(Phi) and hx as sin(Phi), Phi = ... - phase, reversed is the one at the negated
+    phase (and ``swap``'s parameters) with hx negated; with hx kept that one is another handedness, not the reversal.
+    """
+    _, backward = _forward_and_reversed(generator, phase_radians=phase_radians, **parameters)
+    other, _ = _forward_and_reversed(generator, phase_radians=-phase_radians, **{**parameters, **(swap or {})})
+    scale = np.linalg.norm(backward[0])
+    assert np.linalg.norm(backward[0] - other[0] * np.array([[1.0], [-1.0]])) / scale < 1e-5
+    assert np.linalg.norm(backward[0] - other[0]) / scale > 0.5
+
+
 def test_a_reversed_sine_gaussian_is_a_sine_gaussian():
-    """Its envelope is symmetric, so reversed it is the same wavelet at another phase and handedness."""
-    forward, backward = _forward_and_reversed(
-        gf.SineGaussianGenerator, frequency_hertz=100.0, quality_factor=10.0, phase_radians=0.7,
-        polarization_eccentricity=0.5)
-    assert _outside_span(backward[0], forward[0]) < 1e-5
+    """
+    Its envelope is symmetric, so reversed it is the same wavelet at the negated phase with its cross polarisation
+    negated: its handedness flipped where its eccentricity is below 1.
+    """
+    _reversed_is_negated_phase_with_cross_negated(
+        gf.SineGaussianGenerator, frequency_hertz=100.0, quality_factor=10.0, polarization_eccentricity=0.5)
 
 
 def test_a_reversed_chirplet_is_a_chirplet_from_its_end_to_its_start():
-    chirplet = dict(duration_seconds=0.3, phase_radians=0.7, polarization_eccentricity=0.5)
-    _, backward = _forward_and_reversed(
-        gf.ChirpletGenerator, start_frequency_hertz=50.0, end_frequency_hertz=150.0, **chirplet)
-    swapped, _ = _forward_and_reversed(
-        gf.ChirpletGenerator, start_frequency_hertz=150.0, end_frequency_hertz=50.0, **chirplet)
-    assert _outside_span(backward[0], swapped[0]) < 1e-5
+    """
+    Reversed, it is the chirplet from its end frequency to its start at the negated phase with its cross
+    polarisation negated: its handedness flipped where its eccentricity is below 1, as a sine-Gaussian's is.
+    """
+    _reversed_is_negated_phase_with_cross_negated(
+        gf.ChirpletGenerator, start_frequency_hertz=50.0, end_frequency_hertz=150.0, duration_seconds=0.3,
+        polarization_eccentricity=0.5, swap=dict(start_frequency_hertz=150.0, end_frequency_hertz=50.0))
 
 
 @pytest.mark.parametrize("shape", list(gf.WaveShape), ids=lambda shape: shape.name)

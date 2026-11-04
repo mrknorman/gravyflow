@@ -201,10 +201,11 @@ repository before it may need the changes below.
   binary makes. It is taken only by a generator that declares its reversal leaves its family
   (`time_reversal_leaves_family`: `gf.CBCGenerator`), and refused by name for every other: a white-noise burst or a
   periodic wave, whose reversal is another of its kind, a chirplet, whose reversal runs from its end frequency to its
-  start (its generator's own where its start and end distributions allow the swap), a sine-Gaussian, whose reversal is
-  its own wavelet with its handedness flipped where its eccentricity is below 1 and its phase changed where it is
-  nonzero, and a ringdown, whose reversed signal lies before its reference time where a ringdown's lies after it, so it
-  would not be placed as the generator's signals are.
+  start (a chirplet of its generator's only where its start and end distributions allow the swap), a sine-Gaussian,
+  whose reversal keeps its envelope and frequency (each of the two reversed with its cross polarisation negated, so its
+  handedness flipped where its eccentricity is below 1 and its phase negated where it is nonzero), and a ringdown,
+  whose reversed signal lies before its reference time where a ringdown's lies after it, so it would not be placed as
+  the generator's signals are.
 
 - **Hard examples: the networks that can hold one.** Each generator declares the independent waveforms its polarisations
   carry (`independent_waveforms`: 1 for an aligned-spin binary, sine-Gaussian, chirplet, ringdown or periodic wave; 2
