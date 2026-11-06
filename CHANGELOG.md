@@ -138,6 +138,12 @@ repository before it may need the changes below.
 
 ### Added
 
+- **An isotropic angle: `gf.DistributionType.SINE`.** Its density is proportional to sin(x) on [`min_`, `max_`],
+  which must lie within [0, pi]: over [0, pi], the polar angle of a direction uniform on the sphere, so
+  `gf.Distribution(min_=0.0, max_=np.pi, type_=gf.DistributionType.SINE)` is a binary's inclination over the sky
+  (density sin(i) / 2). It is drawn by its inverse CDF, one uniform per value, as `UNIFORM` is; a range outside
+  [0, pi] or without both bounds is refused by name, and one of a point gives that point. It is a new member, so
+  every distribution and stream that existed before draws what it drew.
 - **The efficiency set's own size.** `ValidationConfig.efficiency_num_injections` (by default `num_examples`) sets how
   many injections the efficiency set scores, in stream and window mode, so the noise background's `num_examples` windows
   no longer set it too: an efficiency curve at a few SNRs rarely needs as many injections as the false-alarm background

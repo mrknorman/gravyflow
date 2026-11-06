@@ -20,7 +20,7 @@ The example follows the paper as closely as the library allows:
 
 Where it departs from the paper:
 
-- inclination is uniform in [0, π], not uniform in cos ι (no such prior yet);
+- inclination is uniform in [0, π], not uniform in cos ι (``gf.DistributionType.SINE``);
 - the merger is placed by the library's injection placement, not uniformly in
   the [0.75, 0.95] fraction of the window;
 - the CPU preset (`Gabbard2017Config.cpu`) samples at 2048 Hz.

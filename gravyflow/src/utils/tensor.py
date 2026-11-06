@@ -23,6 +23,9 @@ class DistributionType(Enum):
     CHOICE = auto()
     LOG = auto()
     POW_TWO = auto()
+    #: Density proportional to sin(x) on [min_, max_], within [0, pi]: the polar
+    #: angle of a direction uniform on the sphere, such as a binary's inclination.
+    SINE = auto()
 
 @dataclass(frozen=True)
 class Distribution:
@@ -58,13 +61,14 @@ class Distribution:
         """
         Whether no value has a probability of its own, so that two
         independent draws differ with probability one: a UNIFORM, NORMAL or
-        LOG of floats over more than a point. A CONSTANT, a CHOICE, a POW_TWO,
+        LOG or SINE of floats over more than a point. A CONSTANT, a CHOICE, a POW_TWO,
         a distribution of integers or one whose support is a point gives two
         draws one value with nonzero probability.
         """
         type_ = DistributionType[self.type_.upper()] if isinstance(self.type_, str) else self.type_
         if self.dtype == int or type_ not in (
-                DistributionType.UNIFORM, DistributionType.NORMAL, DistributionType.LOG):
+                DistributionType.UNIFORM, DistributionType.NORMAL, DistributionType.LOG,
+                DistributionType.SINE):
             return False
         if type_ is DistributionType.NORMAL and self.std == 0:
             return False
@@ -145,6 +149,26 @@ class Distribution:
                     raise ValueError("LOG distribution requires min_ > 0.")
                 # Uniform in log10, so log-uniform between min_ and max_.
                 samples = 10 ** rng.uniform(np.log10(low), np.log10(high), num_samples)
+
+            case DistributionType.SINE:
+                if low is None:
+                    raise ValueError("No minimum value given in sine distribution.")
+                if high is None:
+                    raise ValueError("No maximum value given in sine distribution.")
+                if low < 0 or high > np.pi:
+                    raise ValueError(
+                        "A SINE distribution lies within [0, pi], where sin(x) is a "
+                        f"density; got [{low}, {high}]."
+                    )
+                if low == high:
+                    samples = np.full(num_samples, low)
+                else:
+                    # The inverse of the CDF (cos(min_) - cos(x)) / (cos(min_) - cos(max_)),
+                    # one uniform per value. Over [0, pi] it is arccos(1 - 2u), whose
+                    # argument is exact; elsewhere the clips keep rounding within the bounds.
+                    cos_low, cos_high = np.cos(low), np.cos(high)
+                    cosines = cos_low - rng.random(num_samples) * (cos_low - cos_high)
+                    samples = np.clip(np.arccos(np.clip(cosines, cos_high, cos_low)), low, high)
 
             case DistributionType.POW_TWO:
                 power_low, power_high = map(int, np.log2((low, high)))

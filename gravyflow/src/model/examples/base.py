@@ -53,8 +53,8 @@ def cbc_dataset_args(
     Arguments of a dataset of non-spinning BBH injections (IMRPhenomD) in noise
     (coloured L1 noise by default), returning the example models' input contract.
 
-    Inclination is uniform in [0, π]: the library has no uniform-in-cos(ι)
-    prior, which the papers use.
+    Inclination is uniform in [0, π], not isotropic (uniform in cos ι, which
+    ``gf.DistributionType.SINE`` draws) as in the papers.
     """
     lo, hi = mass_range_msun
     masses = gf.Distribution(min_=lo, max_=hi, type_=mass_distribution_type)
